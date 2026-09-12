@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "AI Wellbeing Buffer",
+  "short_name": "Wellbeing Buffer",
+  "version": "1.0.0",
+  "description": "An AI-powered layer that filters toxic, NSFW, and trigger content before it reaches you — and shows you what your feed did to your mood.",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*",
+    "*://*.twitter.com/*",
+    "*://*.x.com/*",
+    "*://*.reddit.com/*",
+    "*://*.facebook.com/*",
+    "*://*.instagram.com/*",
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "AI Wellbeing Buffer"
+  }
+}
