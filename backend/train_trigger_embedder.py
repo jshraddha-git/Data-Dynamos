@@ -27,10 +27,10 @@ import os
 import sys
 
 import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.decomposition import TruncatedSVD
-from sklearn.pipeline import Pipeline
-import joblib
+from sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore[reportMissingModuleSource]
+from sklearn.decomposition import TruncatedSVD  # type: ignore[reportMissingModuleSource]
+from sklearn.pipeline import Pipeline  # type: ignore[reportMissingModuleSource]
+import joblib  # type: ignore[reportMissingImports]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TOXIC_DATA_PATH = os.path.join(BASE_DIR, "data", "toxic_sample.csv")

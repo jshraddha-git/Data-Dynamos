@@ -17,12 +17,12 @@ Usage:
 import os
 import sys
 import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, accuracy_score
-import joblib
+from sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore[reportMissingImports]
+from sklearn.linear_model import LogisticRegression  # type: ignore[reportMissingImports]
+from sklearn.pipeline import Pipeline  # type: ignore[reportMissingImports]
+from sklearn.model_selection import train_test_split  # type: ignore[reportMissingImports]
+from sklearn.metrics import classification_report, accuracy_score  # type: ignore[reportMissingModuleSource]
+import joblib  # type: ignore[reportMissingImports]
 
 # Resolve paths relative to this file so the script works regardless of the
 # working directory it's invoked from (important when main.py calls it via

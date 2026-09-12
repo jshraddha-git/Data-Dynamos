@@ -35,10 +35,10 @@ import random
 
 import numpy as np
 from PIL import Image, ImageDraw
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report
-import joblib
+from sklearn.linear_model import LogisticRegression  # type: ignore[reportMissingImports]
+from sklearn.model_selection import train_test_split  # type: ignore[reportMissingImports]
+from sklearn.metrics import accuracy_score, classification_report  # type: ignore[reportMissingImports]
+import joblib  # type: ignore[reportMissingImports]
 
 from image_features import extract_image_features
 
