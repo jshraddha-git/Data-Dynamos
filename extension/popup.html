@@ -1,319 +1,302 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<title>AI Wellbeing Buffer</title>
-<style>
-  :root {
-    --bg: #0d0f18;
-    --panel: #161a2b;
-    --cyan: #00f6ff;
-    --magenta: #ff2bd6;
-    --purple: #b967ff;
-    --orange: #ff9f1c;
-    --red: #ff3860;
-    --text: #e8f1ff;
-    --muted: #8b93ad;
-  }
+  <meta charset="UTF-8" />
+  <title>AI Wellbeing Buffer</title>
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --panel: #12121a;
+      --border: #23233099;
+      --text: #e8e8f0;
+      --text-dim: #9a9ab0;
+      --cyan: #34e0ff;
+      --red: #ff3860;
+      --orange: #ff8c1a;
+      --purple: #b967ff;
+      --green: #37f2a1;
+    }
 
-  * { box-sizing: border-box; }
+    * { box-sizing: border-box; }
 
-  body {
-    width: 340px;
-    margin: 0;
-    padding: 16px;
-    background: radial-gradient(circle at top left, #191d31, var(--bg));
-    color: var(--text);
-    font-family: "Segoe UI", system-ui, sans-serif;
-  }
+    body {
+      width: 340px;
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", Roboto, sans-serif;
+      font-size: 13px;
+    }
 
-  h1 {
-    font-size: 15px;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    margin: 0 0 4px 0;
-    background: linear-gradient(90deg, var(--cyan), var(--magenta));
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-  }
+    header {
+      padding: 14px 16px 10px;
+      border-bottom: 1px solid var(--border);
+    }
 
-  .subtitle {
-    font-size: 11px;
-    color: var(--muted);
-    margin-bottom: 16px;
-  }
+    header h1 {
+      font-size: 15px;
+      margin: 0 0 2px;
+      color: var(--cyan);
+      letter-spacing: 0.3px;
+    }
 
-  section {
-    background: var(--panel);
-    border: 1px solid rgba(0, 246, 255, 0.12);
-    border-radius: 10px;
-    padding: 12px 14px;
-    margin-bottom: 12px;
-  }
+    header p {
+      margin: 0;
+      color: var(--text-dim);
+      font-size: 11.5px;
+    }
 
-  section h2 {
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--muted);
-    margin: 0 0 10px 0;
-  }
+    .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+      background: var(--text-dim);
+    }
+    .status-dot.online { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .status-dot.offline { background: var(--red); box-shadow: 0 0 6px var(--red); }
 
-  /* --- Sensitivity slider --- */
-  .slider-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
+    section {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+    }
 
-  input[type="range"] {
-    flex: 1;
-    accent-color: var(--cyan);
-  }
+    section h2 {
+      font-size: 11.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--text-dim);
+      margin: 0 0 10px;
+    }
 
-  #thresholdValue {
-    font-weight: 700;
-    color: var(--cyan);
-    min-width: 34px;
-    text-align: right;
-    font-size: 13px;
-  }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
 
-  /* --- Trigger tags --- */
-  .tag-input-row {
-    display: flex;
-    gap: 6px;
-    margin-bottom: 10px;
-  }
+    .row:last-child { margin-bottom: 0; }
 
-  #tagInput {
-    flex: 1;
-    background: #0d0f18;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 6px;
-    padding: 6px 8px;
-    color: var(--text);
-    font-size: 12px;
-  }
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--cyan);
+    }
 
-  #addTagBtn {
-    background: var(--purple);
-    border: none;
-    color: #1a0033;
-    font-weight: 700;
-    border-radius: 6px;
-    padding: 6px 10px;
-    cursor: pointer;
-    font-size: 12px;
-  }
+    #thresholdValue {
+      color: var(--cyan);
+      font-weight: 700;
+      min-width: 34px;
+      text-align: right;
+    }
 
-  #tagList {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
+    .toggle-label { color: var(--text); }
 
-  .tag-chip {
-    background: rgba(185, 103, 255, 0.15);
-    border: 1px solid var(--purple);
-    color: var(--purple);
-    border-radius: 999px;
-    padding: 4px 10px;
-    font-size: 11px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
+    .switch {
+      position: relative;
+      width: 38px;
+      height: 20px;
+      flex-shrink: 0;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider-toggle {
+      position: absolute;
+      cursor: pointer;
+      inset: 0;
+      background: #2a2a38;
+      border-radius: 999px;
+      transition: 0.2s;
+    }
+    .slider-toggle::before {
+      content: "";
+      position: absolute;
+      height: 14px;
+      width: 14px;
+      left: 3px;
+      bottom: 3px;
+      background: var(--text-dim);
+      border-radius: 50%;
+      transition: 0.2s;
+    }
+    input:checked + .slider-toggle { background: rgba(52, 224, 255, 0.25); }
+    input:checked + .slider-toggle::before { background: var(--cyan); transform: translateX(18px); }
 
-  .tag-chip button {
-    background: none;
-    border: none;
-    color: var(--purple);
-    cursor: pointer;
-    font-size: 12px;
-    line-height: 1;
-    padding: 0;
-  }
+    #triggerTags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 8px;
+      min-height: 20px;
+    }
 
-  /* --- Toggles --- */
-  .toggle-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 10px;
-    font-size: 12px;
-  }
-  .toggle-row:last-child { margin-bottom: 0; }
+    .tag {
+      background: rgba(185, 103, 255, 0.15);
+      border: 1px solid var(--purple);
+      color: var(--purple);
+      border-radius: 999px;
+      padding: 3px 10px;
+      font-size: 11.5px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
 
-  .switch {
-    position: relative;
-    display: inline-block;
-    width: 38px;
-    height: 20px;
-  }
-  .switch input { opacity: 0; width: 0; height: 0; }
-  .slider-track {
-    position: absolute;
-    cursor: pointer;
-    inset: 0;
-    background-color: #2a2f45;
-    transition: 0.2s;
-    border-radius: 999px;
-  }
-  .slider-track:before {
-    position: absolute;
-    content: "";
-    height: 14px;
-    width: 14px;
-    left: 3px;
-    bottom: 3px;
-    background-color: var(--text);
-    transition: 0.2s;
-    border-radius: 50%;
-  }
-  input:checked + .slider-track {
-    background-color: var(--cyan);
-  }
-  input:checked + .slider-track:before {
-    transform: translateX(18px);
-  }
+    .tag button {
+      background: none;
+      border: none;
+      color: var(--purple);
+      cursor: pointer;
+      font-size: 12px;
+      line-height: 1;
+      padding: 0;
+    }
 
-  /* --- Mood dashboard --- */
-  .mood-stats {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
-    margin-bottom: 10px;
-  }
+    #triggerInput {
+      width: 100%;
+      padding: 7px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      font-size: 12.5px;
+    }
+    #triggerInput:focus { outline: 1px solid var(--cyan); }
 
-  .stat-box {
-    background: #0d0f18;
-    border-radius: 8px;
-    padding: 8px 10px;
-    text-align: center;
-  }
+    .stat-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
 
-  .stat-value {
-    font-size: 18px;
-    font-weight: 800;
-    color: var(--cyan);
-  }
+    .stat-box {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      text-align: center;
+    }
 
-  .stat-label {
-    font-size: 10px;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    margin-top: 2px;
-  }
+    .stat-box .value {
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--cyan);
+    }
 
-  #moodScoreWrap {
-    text-align: center;
-    padding: 10px 0 4px 0;
-  }
+    .stat-box .label {
+      font-size: 10px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      margin-top: 2px;
+    }
 
-  #moodScoreValue {
-    font-size: 30px;
-    font-weight: 900;
-    background: linear-gradient(90deg, var(--cyan), var(--purple));
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-  }
+    #moodScoreBox {
+      background: linear-gradient(135deg, rgba(52,224,255,0.08), rgba(185,103,255,0.08));
+      border: 1px solid var(--cyan);
+      border-radius: 8px;
+      padding: 12px;
+      text-align: center;
+    }
 
-  #moodSummary {
-    font-size: 11px;
-    color: var(--muted);
-    margin-top: 6px;
-  }
+    #moodScoreValue {
+      font-size: 28px;
+      font-weight: 800;
+      color: var(--green);
+    }
 
-  #resetSessionBtn {
-    width: 100%;
-    margin-top: 10px;
-    padding: 8px;
-    background: transparent;
-    border: 1px solid var(--red);
-    color: var(--red);
-    border-radius: 6px;
-    font-size: 11px;
-    font-weight: 700;
-    cursor: pointer;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-  #resetSessionBtn:hover {
-    background: var(--red);
-    color: #1a0007;
-  }
+    #moodSummary {
+      color: var(--text-dim);
+      font-size: 11px;
+      margin-top: 6px;
+      line-height: 1.4;
+    }
 
-  #backendStatus {
-    font-size: 10px;
-    text-align: center;
-    color: var(--muted);
-    margin-top: 4px;
-  }
-</style>
+    .refresh-btn {
+      width: 100%;
+      margin-top: 10px;
+      padding: 8px;
+      border-radius: 6px;
+      border: 1px solid var(--cyan);
+      background: rgba(52, 224, 255, 0.08);
+      color: var(--cyan);
+      font-weight: 600;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .refresh-btn:hover { background: rgba(52, 224, 255, 0.18); }
+
+    footer {
+      padding: 8px 16px;
+      font-size: 10px;
+      color: var(--text-dim);
+      text-align: center;
+    }
+  </style>
 </head>
 <body>
-  <h1>AI Wellbeing Buffer</h1>
-  <div class="subtitle">Locally-hosted models · your rules, your feed</div>
+  <header>
+    <h1>🛡 AI Wellbeing Buffer</h1>
+    <p><span id="statusDot" class="status-dot"></span><span id="statusText">Checking backend…</span></p>
+  </header>
 
   <section>
-    <h2>Sensitivity Threshold</h2>
-    <div class="slider-row">
-      <input type="range" id="thresholdSlider" min="0.1" max="1.0" step="0.05" value="0.5" />
+    <h2>Sensitivity</h2>
+    <div class="row">
+      <input type="range" id="thresholdSlider" min="0.1" max="1.0" step="0.05" />
       <span id="thresholdValue">0.50</span>
     </div>
-  </section>
-
-  <section>
-    <h2>Topics to Avoid (Semantic Triggers)</h2>
-    <div class="tag-input-row">
-      <input type="text" id="tagInput" placeholder="e.g. spoilers, politics, crypto" />
-      <button id="addTagBtn">Add</button>
+    <div class="row">
+      <span class="toggle-label">Master enable</span>
+      <label class="switch">
+        <input type="checkbox" id="enabledToggle" />
+        <span class="slider-toggle"></span>
+      </label>
     </div>
-    <div id="tagList"></div>
-  </section>
-
-  <section>
-    <h2>Filters</h2>
-    <div class="toggle-row">
-      <span>NSFW Image Filtering</span>
+    <div class="row">
+      <span class="toggle-label">NSFW image filtering</span>
       <label class="switch">
         <input type="checkbox" id="nsfwToggle" />
-        <span class="slider-track"></span>
+        <span class="slider-toggle"></span>
       </label>
     </div>
-    <div class="toggle-row">
-      <span>Pre-Post Draft Checking</span>
+    <div class="row">
+      <span class="toggle-label">Pre-post draft check</span>
       <label class="switch">
         <input type="checkbox" id="draftToggle" />
-        <span class="slider-track"></span>
+        <span class="slider-toggle"></span>
       </label>
     </div>
   </section>
 
   <section>
-    <h2>Mood &amp; Wellbeing Dashboard</h2>
-    <div class="mood-stats">
-      <div class="stat-box">
-        <div class="stat-value" id="scrollTimeValue">0 Mins</div>
-        <div class="stat-label">Scrolling Time</div>
-      </div>
-      <div class="stat-box">
-        <div class="stat-value" id="totalBlockedValue">0</div>
-        <div class="stat-label">Items Blocked</div>
-      </div>
-    </div>
-    <div id="moodScoreWrap">
-      <div id="moodScoreValue">--%</div>
-      <div class="stat-label">Mental Peace Preserved</div>
-      <div id="moodSummary"></div>
-    </div>
-    <button id="resetSessionBtn">Reset Session</button>
-    <div id="backendStatus"></div>
+    <h2>Topics to Avoid</h2>
+    <div id="triggerTags"></div>
+    <input type="text" id="triggerInput" placeholder="Type a topic and press Enter (e.g. spoilers)" />
   </section>
+
+  <section>
+    <h2>This Session</h2>
+    <div class="stat-grid">
+      <div class="stat-box">
+        <div class="value" id="statTime">0m</div>
+        <div class="label">Scrolling</div>
+      </div>
+      <div class="stat-box">
+        <div class="value" id="statBlocked">0</div>
+        <div class="label">Items Blocked</div>
+      </div>
+    </div>
+    <div id="moodScoreBox">
+      <div id="moodScoreValue">—</div>
+      <div class="label" style="color: var(--text-dim); font-size: 10px; margin-top: 2px;">MENTAL PEACE PRESERVED</div>
+      <div id="moodSummary">Waiting for session data…</div>
+    </div>
+    <button class="refresh-btn" id="refreshMoodBtn">Refresh Wellbeing Score</button>
+  </section>
+
+  <footer>Local models only · no data leaves your machine</footer>
 
   <script src="popup.js"></script>
 </body>

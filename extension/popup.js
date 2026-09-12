@@ -1,189 +1,184 @@
 /**
  * popup.js
- * --------
+ * ---------
  * Wires up the popup dashboard:
- *   - Sensitivity threshold slider -> chrome.storage.local.toxicityThreshold
- *   - Trigger topic tags -> chrome.storage.local.userTriggers
- *   - NSFW / draft-check toggles -> chrome.storage.local.{nsfwFilterEnabled,draftCheckEnabled}
- *   - Mood & Wellbeing Dashboard -> reads session counters from storage,
- *     POSTs them to /calculate-mood-impact, and renders the result.
+ *   - Sensitivity slider, master/NSFW/draft-check toggles -> chrome.storage.local
+ *   - Trigger-topic tag input -> chrome.storage.local (read by content.js)
+ *   - Mood & Wellbeing dashboard -> reads session stats from chrome.storage.local
+ *     (written by content.js) and calls the backend's /calculate-mood-impact
  */
 
 const API_BASE = "http://localhost:8000";
 
-const DEFAULT_SETTINGS = {
-  userTriggers: [],
-  toxicityThreshold: 0.5,
-  nsfwFilterEnabled: true,
-  draftCheckEnabled: true,
-};
-
-const els = {
+const el = {
+  statusDot: document.getElementById("statusDot"),
+  statusText: document.getElementById("statusText"),
   thresholdSlider: document.getElementById("thresholdSlider"),
   thresholdValue: document.getElementById("thresholdValue"),
-  tagInput: document.getElementById("tagInput"),
-  addTagBtn: document.getElementById("addTagBtn"),
-  tagList: document.getElementById("tagList"),
+  enabledToggle: document.getElementById("enabledToggle"),
   nsfwToggle: document.getElementById("nsfwToggle"),
   draftToggle: document.getElementById("draftToggle"),
-  scrollTimeValue: document.getElementById("scrollTimeValue"),
-  totalBlockedValue: document.getElementById("totalBlockedValue"),
+  triggerTags: document.getElementById("triggerTags"),
+  triggerInput: document.getElementById("triggerInput"),
+  statTime: document.getElementById("statTime"),
+  statBlocked: document.getElementById("statBlocked"),
   moodScoreValue: document.getElementById("moodScoreValue"),
   moodSummary: document.getElementById("moodSummary"),
-  resetSessionBtn: document.getElementById("resetSessionBtn"),
-  backendStatus: document.getElementById("backendStatus"),
+  refreshMoodBtn: document.getElementById("refreshMoodBtn"),
 };
 
-let currentTriggers = [];
+const DEFAULTS = {
+  toxicityThreshold: 0.5,
+  userTriggers: [],
+  nsfwFilteringEnabled: true,
+  draftCheckEnabled: true,
+  extensionEnabled: true,
+};
 
 // ---------------------------------------------------------------------
-// Settings: load + render
+// Settings: load + persist
 // ---------------------------------------------------------------------
-function loadSettingsIntoUI() {
-  chrome.storage.local.get(DEFAULT_SETTINGS, (settings) => {
-    els.thresholdSlider.value = settings.toxicityThreshold;
-    els.thresholdValue.textContent = Number(settings.toxicityThreshold).toFixed(2);
-    els.nsfwToggle.checked = !!settings.nsfwFilterEnabled;
-    els.draftToggle.checked = !!settings.draftCheckEnabled;
-    currentTriggers = Array.isArray(settings.userTriggers) ? settings.userTriggers : [];
-    renderTagList();
+function loadSettings() {
+  chrome.storage.local.get(Object.keys(DEFAULTS), (stored) => {
+    const settings = { ...DEFAULTS, ...stored };
+
+    el.thresholdSlider.value = settings.toxicityThreshold;
+    el.thresholdValue.textContent = Number(settings.toxicityThreshold).toFixed(2);
+    el.enabledToggle.checked = settings.extensionEnabled;
+    el.nsfwToggle.checked = settings.nsfwFilteringEnabled;
+    el.draftToggle.checked = settings.draftCheckEnabled;
+
+    renderTags(settings.userTriggers);
   });
 }
 
-function renderTagList() {
-  els.tagList.innerHTML = "";
-  currentTriggers.forEach((tag, idx) => {
-    const chip = document.createElement("div");
-    chip.className = "tag-chip";
+function renderTags(triggers) {
+  el.triggerTags.innerHTML = "";
+  triggers.forEach((topic, idx) => {
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.innerHTML = `${escapeHtml(topic)} <button data-idx="${idx}" title="Remove">✕</button>`;
+    el.triggerTags.appendChild(tag);
+  });
 
-    const label = document.createElement("span");
-    label.textContent = tag;
-
-    const removeBtn = document.createElement("button");
-    removeBtn.textContent = "✕";
-    removeBtn.addEventListener("click", () => {
-      currentTriggers.splice(idx, 1);
-      persistTriggers();
-      renderTagList();
+  el.triggerTags.querySelectorAll("button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.idx);
+      chrome.storage.local.get(["userTriggers"], ({ userTriggers = [] }) => {
+        const updated = userTriggers.filter((_, i) => i !== idx);
+        chrome.storage.local.set({ userTriggers: updated }, () => renderTags(updated));
+      });
     });
-
-    chip.appendChild(label);
-    chip.appendChild(removeBtn);
-    els.tagList.appendChild(chip);
   });
 }
 
-function persistTriggers() {
-  chrome.storage.local.set({ userTriggers: currentTriggers });
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
 }
 
-// ---------------------------------------------------------------------
-// Event wiring: threshold, tags, toggles
-// ---------------------------------------------------------------------
-els.thresholdSlider.addEventListener("input", () => {
-  const val = parseFloat(els.thresholdSlider.value);
-  els.thresholdValue.textContent = val.toFixed(2);
-  chrome.storage.local.set({ toxicityThreshold: val });
+el.thresholdSlider.addEventListener("input", () => {
+  const value = parseFloat(el.thresholdSlider.value);
+  el.thresholdValue.textContent = value.toFixed(2);
+  chrome.storage.local.set({ toxicityThreshold: value });
 });
 
-els.addTagBtn.addEventListener("click", addTagFromInput);
-els.tagInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
-    e.preventDefault();
-    addTagFromInput();
-  }
+el.enabledToggle.addEventListener("change", () => {
+  chrome.storage.local.set({ extensionEnabled: el.enabledToggle.checked });
 });
 
-function addTagFromInput() {
-  const raw = els.tagInput.value.trim();
-  if (!raw) return;
-
-  // Support comma-separated bulk entry, e.g. "spoilers, politics, crypto".
-  const newTags = raw
-    .split(",")
-    .map((t) => t.trim().toLowerCase())
-    .filter((t) => t.length > 0 && !currentTriggers.includes(t));
-
-  currentTriggers = currentTriggers.concat(newTags);
-  persistTriggers();
-  renderTagList();
-  els.tagInput.value = "";
-}
-
-els.nsfwToggle.addEventListener("change", () => {
-  chrome.storage.local.set({ nsfwFilterEnabled: els.nsfwToggle.checked });
+el.nsfwToggle.addEventListener("change", () => {
+  chrome.storage.local.set({ nsfwFilteringEnabled: el.nsfwToggle.checked });
 });
 
-els.draftToggle.addEventListener("change", () => {
-  chrome.storage.local.set({ draftCheckEnabled: els.draftToggle.checked });
+el.draftToggle.addEventListener("change", () => {
+  chrome.storage.local.set({ draftCheckEnabled: el.draftToggle.checked });
 });
 
-// ---------------------------------------------------------------------
-// Mood & Wellbeing Dashboard
-// ---------------------------------------------------------------------
-async function refreshMoodDashboard() {
-  chrome.storage.local.get(
-    [
-      "sessionStart",
-      "toxicBlockedCount",
-      "nsfwBlockedCount",
-      "triggerBlockedCount",
-    ],
-    async (data) => {
-      const sessionStart = data.sessionStart || Date.now();
-      const toxicBlockedCount = data.toxicBlockedCount || 0;
-      const nsfwBlockedCount = data.nsfwBlockedCount || 0;
-      const triggerBlockedCount = data.triggerBlockedCount || 0;
-
-      const minutes = Math.max(0, (Date.now() - sessionStart) / 60000);
-      const totalBlocked = toxicBlockedCount + nsfwBlockedCount + triggerBlockedCount;
-
-      els.scrollTimeValue.textContent = `${Math.round(minutes)} Mins`;
-      els.totalBlockedValue.textContent = String(totalBlocked);
-
-      try {
-        const res = await fetch(`${API_BASE}/calculate-mood-impact`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            session_duration_minutes: minutes,
-            toxic_blocked_count: toxicBlockedCount,
-            nsfw_blocked_count: nsfwBlockedCount,
-            trigger_blocked_count: triggerBlockedCount,
-          }),
-        });
-
-        if (!res.ok) throw new Error(`Backend returned ${res.status}`);
-        const result = await res.json();
-
-        els.moodScoreValue.textContent = `${Math.round(result.mood_preservation_score)}%`;
-        els.moodSummary.textContent = result.summary;
-        els.backendStatus.textContent = "";
-      } catch (err) {
-        els.moodScoreValue.textContent = "--%";
-        els.moodSummary.textContent = "";
-        els.backendStatus.textContent =
-          "Backend unreachable — start the FastAPI server on localhost:8000.";
-      }
+el.triggerInput.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  const topic = el.triggerInput.value.trim();
+  if (!topic) return;
+  chrome.storage.local.get(["userTriggers"], ({ userTriggers = [] }) => {
+    if (userTriggers.includes(topic)) {
+      el.triggerInput.value = "";
+      return;
     }
-  );
+    const updated = [...userTriggers, topic];
+    chrome.storage.local.set({ userTriggers: updated }, () => {
+      renderTags(updated);
+      el.triggerInput.value = "";
+    });
+  });
+});
+
+// ---------------------------------------------------------------------
+// Backend health check
+// ---------------------------------------------------------------------
+async function checkBackendHealth() {
+  try {
+    const res = await fetch(`${API_BASE}/health`, { method: "GET" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    el.statusDot.className = "status-dot online";
+    el.statusText.textContent = data.using_fallback_toxicity
+      ? "Online (Detoxify fallback model)"
+      : "Online (self-trained model active)";
+  } catch (err) {
+    el.statusDot.className = "status-dot offline";
+    el.statusText.textContent = "Backend offline — start main.py on :8000";
+  }
 }
 
-els.resetSessionBtn.addEventListener("click", () => {
-  chrome.storage.local.set(
-    {
-      sessionStart: Date.now(),
-      toxicBlockedCount: 0,
-      nsfwBlockedCount: 0,
-      triggerBlockedCount: 0,
-    },
-    refreshMoodDashboard
-  );
-});
+// ---------------------------------------------------------------------
+// Mood & Wellbeing dashboard
+// ---------------------------------------------------------------------
+function getSessionStats() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(["sessionStats", "sessionStartTimestamp"], (data) => {
+      resolve({
+        stats: data.sessionStats || { toxicBlocked: 0, nsfwBlocked: 0, triggerBlocked: 0 },
+        startedAt: data.sessionStartTimestamp || Date.now(),
+      });
+    });
+  });
+}
+
+async function refreshMoodDashboard() {
+  const { stats, startedAt } = await getSessionStats();
+  const minutes = Math.max(0, (Date.now() - startedAt) / 60000);
+  const totalBlocked = stats.toxicBlocked + stats.nsfwBlocked + stats.triggerBlocked;
+
+  el.statTime.textContent = `${minutes.toFixed(0)}m`;
+  el.statBlocked.textContent = totalBlocked;
+
+  try {
+    const res = await fetch(`${API_BASE}/calculate-mood-impact`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_duration_minutes: minutes,
+        toxic_blocked_count: stats.toxicBlocked,
+        nsfw_blocked_count: stats.nsfwBlocked,
+        trigger_blocked_count: stats.triggerBlocked,
+      }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    el.moodScoreValue.textContent = `${data.mood_preservation_score.toFixed(0)}%`;
+    el.moodSummary.textContent = data.summary;
+  } catch (err) {
+    el.moodScoreValue.textContent = "—";
+    el.moodSummary.textContent = "Couldn't reach the backend for a mood score.";
+  }
+}
+
+el.refreshMoodBtn.addEventListener("click", refreshMoodDashboard);
 
 // ---------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------
-loadSettingsIntoUI();
+loadSettings();
+checkBackendHealth();
 refreshMoodDashboard();
-setInterval(refreshMoodDashboard, 5000);

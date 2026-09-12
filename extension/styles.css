@@ -1,30 +1,44 @@
-/* styles.css
-   ----------
-   Injected on every page by content.js. Namespaced with the `wb-` prefix
-   to avoid colliding with host-page styles. Dark, neon "cyberpunk" theme
-   with smooth transitions for blur reveal/hide.
-*/
+/* ==========================================================================
+   AI Wellbeing Buffer — content-script styles
+   Cyberpunk dark theme: near-black backgrounds, neon accent borders,
+   smooth blur/reveal transitions.
+   ========================================================================== */
 
 :root {
-  --wb-bg: #0d0f18;
-  --wb-panel: #14172455;
-  --wb-cyan: #00f6ff;
-  --wb-magenta: #ff2bd6;
-  --wb-red: #ff3860;
-  --wb-orange: #ff9f1c;
-  --wb-purple: #b967ff;
-  --wb-text: #e8f1ff;
-  --wb-muted: #9aa5c1;
+  --wb-bg-dark: #0a0a0f;
+  --wb-bg-panel: #12121a;
+  --wb-neon-red: #ff3860;
+  --wb-neon-orange: #ff8c1a;
+  --wb-neon-purple: #b967ff;
+  --wb-neon-cyan: #34e0ff;
+  --wb-text: #e8e8f0;
+  --wb-text-dim: #9a9ab0;
+  --wb-radius: 10px;
+  --wb-transition: 0.28s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* --- Blurred content + overlay --- */
-.wb-blurred > *:not(.wb-overlay) {
-  filter: blur(12px) brightness(0.6);
-  transition: filter 0.35s ease;
+/* Blur applied directly to the flagged post/image node */
+.wb-blurred {
+  filter: blur(12px) brightness(0.7);
+  transition: filter var(--wb-transition);
   pointer-events: none;
   user-select: none;
 }
 
+.wb-blurred.wb-revealed {
+  filter: none;
+  pointer-events: auto;
+  user-select: auto;
+}
+
+/* Wrapper the extension injects around a flagged element so the overlay
+   badge can be absolutely positioned on top of it */
+.wb-wrapper {
+  position: relative !important;
+  display: block;
+}
+
+/* Overlay badge shown on top of blurred content */
 .wb-overlay {
   position: absolute;
   inset: 0;
@@ -33,172 +47,95 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 16px;
-  text-align: center;
-  background: linear-gradient(180deg, rgba(13, 15, 24, 0.85), rgba(13, 15, 24, 0.92));
+  gap: 10px;
+  background: rgba(10, 10, 15, 0.55);
   backdrop-filter: blur(2px);
-  border-radius: 10px;
-  border: 1px solid rgba(0, 246, 255, 0.25);
-  box-shadow: 0 0 24px rgba(0, 246, 255, 0.08);
-  transition: opacity 0.3s ease;
-  font-family: "Segoe UI", system-ui, sans-serif;
+  border-radius: var(--wb-radius);
+  opacity: 1;
+  transition: opacity var(--wb-transition);
+  font-family: "Segoe UI", Roboto, sans-serif;
 }
 
-.wb-overlay-hidden {
+.wb-overlay.wb-hidden {
   opacity: 0;
   pointer-events: none;
 }
 
 .wb-badge {
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.03em;
   padding: 6px 14px;
   border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  box-shadow: 0 0 14px currentColor;
   text-transform: uppercase;
-  color: #0d0f18;
-  box-shadow: 0 0 12px currentColor;
 }
 
 .wb-badge-toxic {
-  background: var(--wb-red);
-  color: var(--wb-red);
-  background: var(--wb-red);
-}
-.wb-badge-toxic {
-  background-color: var(--wb-red);
-  color: #1a0007;
+  background: var(--wb-neon-red);
+  color: var(--wb-neon-red);
+  background-color: rgba(255, 56, 96, 0.9);
 }
 
 .wb-badge-nsfw {
-  background-color: var(--wb-orange);
-  color: #241200;
+  background-color: rgba(255, 140, 26, 0.9);
+  color: var(--wb-neon-orange);
 }
 
 .wb-badge-trigger {
-  background-color: var(--wb-purple);
-  color: #1a0033;
-}
-
-.wb-reason {
-  font-size: 12px;
-  color: var(--wb-muted);
-  max-width: 320px;
+  background-color: rgba(185, 103, 255, 0.9);
+  color: var(--wb-neon-purple);
 }
 
 .wb-unhide-btn {
-  margin-top: 4px;
-  padding: 8px 18px;
-  border-radius: 8px;
-  border: 1px solid var(--wb-cyan);
-  background: transparent;
-  color: var(--wb-cyan);
-  font-weight: 600;
-  font-size: 13px;
-  cursor: pointer;
-  transition: background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
-}
-
-.wb-unhide-btn:hover {
-  background: var(--wb-cyan);
-  color: #001014;
-  box-shadow: 0 0 16px rgba(0, 246, 255, 0.6);
-}
-
-/* --- Pre-post draft alert --- */
-.wb-draft-alert {
-  margin-top: 8px;
-  padding: 12px 14px;
-  border-radius: 10px;
-  background: linear-gradient(180deg, #14172a, #0d0f18);
-  border: 1px solid rgba(255, 43, 214, 0.35);
-  box-shadow: 0 0 18px rgba(255, 43, 214, 0.12);
-  font-family: "Segoe UI", system-ui, sans-serif;
-  color: var(--wb-text);
-  animation: wb-fade-in 0.25s ease;
-}
-
-@keyframes wb-fade-in {
-  from {
-    opacity: 0;
-    transform: translateY(-4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.wb-draft-alert-title {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--wb-orange);
-  margin-bottom: 6px;
-}
-
-.wb-draft-alert-suggestion {
-  font-size: 13px;
-  color: var(--wb-muted);
-  margin-bottom: 10px;
-  line-height: 1.4;
-  font-style: italic;
-}
-
-.wb-draft-alert-use-btn,
-.wb-draft-alert-dismiss-btn {
-  padding: 6px 12px;
+  padding: 6px 16px;
   border-radius: 6px;
+  border: 1px solid var(--wb-neon-cyan);
+  background: rgba(52, 224, 255, 0.08);
+  color: var(--wb-neon-cyan);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  margin-right: 8px;
-  border: 1px solid transparent;
-  transition: opacity 0.2s ease;
+  transition: background var(--wb-transition), transform 0.15s ease;
 }
 
-.wb-draft-alert-use-btn {
-  background: var(--wb-cyan);
-  color: #001014;
+.wb-unhide-btn:hover {
+  background: rgba(52, 224, 255, 0.2);
+  transform: translateY(-1px);
 }
 
-.wb-draft-alert-dismiss-btn {
-  background: transparent;
-  border-color: var(--wb-muted);
-  color: var(--wb-muted);
-}
-
-.wb-draft-alert-use-btn:hover,
-.wb-draft-alert-dismiss-btn:hover {
-  opacity: 0.8;
-}
-/* --- Ambient Tone Neutralization Card --- */
-.wb-neutral-card {
-  background: linear-gradient(180deg, #14172a, #0d0f18);
-  border: 1px solid rgba(0, 246, 255, 0.35); /* Neon cyan accent */
-  border-radius: 10px;
-  padding: 12px 16px;
-  margin: 10px 0;
-  font-family: "Segoe UI", system-ui, sans-serif;
+/* ---- Pre-post compose warning ---- */
+.wb-draft-warning {
+  margin-top: 6px;
+  padding: 10px 14px;
+  border-radius: var(--wb-radius);
+  background: var(--wb-bg-panel);
+  border: 1px solid var(--wb-neon-orange);
   color: var(--wb-text);
-  box-shadow: 0 0 18px rgba(0, 246, 255, 0.12);
-  animation: wb-fade-in 0.25s ease;
+  font-family: "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  box-shadow: 0 0 16px rgba(255, 140, 26, 0.25);
+  animation: wb-fade-in var(--wb-transition);
 }
 
-.wb-neutral-header {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--wb-cyan); /* Neon cyan heading */
-  margin-bottom: 6px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.wb-draft-warning strong {
+  color: var(--wb-neon-orange);
 }
 
-.wb-neutral-text {
-  font-size: 13px;
-  color: var(--wb-muted);
-  line-height: 1.4;
-  margin: 0;
+.wb-draft-warning .wb-suggestion {
+  display: block;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--wb-neon-cyan);
+  background: rgba(52, 224, 255, 0.06);
+  color: var(--wb-neon-cyan);
   font-style: italic;
+}
+
+@keyframes wb-fade-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
