@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: ai-wellbeing-buffer-backend
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    plan: starter
+    region: oregon
+    healthCheckPath: /health
+    disk:
+      name: wellbeing-data
+      mountPath: /app/cache
+      sizeGB: 10
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: API_KEY
+        generateValue: true
+      - key: ALLOWED_ORIGINS
+        value: "chrome-extension://*,http://localhost:8000"
+      - key: TORCH_HOME
+        value: /app/cache/torch
+      - key: HF_HOME
+        value: /app/cache/huggingface
+      - key: NUDENET_CACHE_DIR
+        value: /app/cache/nudenet

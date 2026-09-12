@@ -1,0 +1,39 @@
+# fly.toml app configuration file generated for ai-wellbeing-buffer
+app = "ai-wellbeing-buffer"
+primary_region = "iad"
+
+[build]
+  dockerfile = "backend/Dockerfile"
+
+[env]
+  PORT = "8000"
+  MODEL_DIR = "/app/models"
+  CACHE_DIR = "/app/cache"
+  TORCH_HOME = "/app/cache/torch"
+  HF_HOME = "/app/cache/huggingface"
+  NUDENET_CACHE_DIR = "/app/cache/nudenet"
+  MODEL_PATH = "/app/models/custom_toxic_model.joblib"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[[http_service.checks]]
+  grace_period = "30s"
+  interval = "15s"
+  method = "get"
+  path = "/health"
+  timeout = "5s"
+
+[mounts]
+  source = "wellbeing_storage"
+  destination = "/app/cache"
+  initial_size = "5gb"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2048mb"

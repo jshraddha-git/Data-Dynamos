@@ -2,22 +2,24 @@
 __pycache__/
 *.pyc
 *.pyo
-
 # Virtual environments
 venv/
 .venv/
 env/
-
-# Generated model artifacts (regenerate with `python train_model.py`)
+# Generated model artifacts & training logs
 backend/*.joblib
+backend/training_metrics.json
 backend/_tmp_nsfw_check*.jpg
 backend/tmp*.jpg
-
+backend/models/
+backend/cache/
+# Local configuration & secrets
+.env
+.env.*
 # OS / editor cruft
 .DS_Store
 .vscode/
 .idea/
-
 # Downloaded model weight caches (Detoxify / sentence-transformers / NudeNet)
 *.cache/
 ~/.cache/torch/

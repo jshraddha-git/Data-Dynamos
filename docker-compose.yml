@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: wellbeing_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - API_KEY=dev-wellbeing-key-12345
+      - ALLOWED_ORIGINS=http://localhost:8000,http://127.0.0.1:8000,chrome-extension://*
+      - MODEL_PATH=/app/models/custom_toxic_model.joblib
+      - MODEL_DIR=/app/models
+      - CACHE_DIR=/app/cache
+      - TORCH_HOME=/app/cache/torch
+      - HF_HOME=/app/cache/huggingface
+      - NUDENET_CACHE_DIR=/app/cache/nudenet
+    volumes:
+      - model-data:/app/models
+      - cache-data:/app/cache
+      - ./backend/data:/app/data
+
+volumes:
+  model-data:
+    name: wellbeing_models
+  cache-data:
+    name: wellbeing_cache
