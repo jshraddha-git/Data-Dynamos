@@ -1,54 +1,58 @@
 /**
  * content.js
- * -----------
- * Runs on every page (see manifest.json host_permissions).
- *
- * Responsibilities:
- *   1. Scan the feed for post-like nodes as they're added (MutationObserver
- *      handles infinite-scroll feeds), extract text + image URLs, and send
- *      them to the backend BEFORE they're visually settled on screen.
- *   2. Apply a CSS blur + liftable overlay badge to anything flagged.
- *   3. Watch comment/post compose boxes and run a debounced pre-post
- *      toxicity check, injecting an inline rephrase suggestion.
- *   4. Track session stats (posts blocked, by category) for the mood
- *      dashboard in popup.js, persisted to chrome.storage.local.
+ * ----------
+ * Injected into every page. Responsibilities:
+ *   1. Scan the DOM for "post-like" content blocks (using a MutationObserver
+ *      so infinite-scroll feeds are handled), extract text + image URLs,
+ *      and send them to the local backend's /analyze-post endpoint.
+ *   2. Apply a CSS blur + liftable warning badge over anything flagged.
+ *   3. Watch compose boxes (textareas / contenteditable) and run drafts
+ *      through /check-draft, injecting an inline rephrase suggestion.
+ *   4. Track session stats (blocked counts, session start time) in
+ *      chrome.storage.local so the popup dashboard can read them.
  */
 
 (() => {
   const API_BASE = "http://localhost:8000";
 
-  // ---------------------------------------------------------------------
-  // Config loaded from chrome.storage.local (set via popup.js)
-  // ---------------------------------------------------------------------
   const DEFAULT_SETTINGS = {
-    toxicityThreshold: 0.5,
     userTriggers: [],
-    nsfwFilteringEnabled: true,
+    toxicityThreshold: 0.5,
+    nsfwFilterEnabled: true,
     draftCheckEnabled: true,
-    extensionEnabled: true,
   };
 
+  // In-memory cache of settings, refreshed from chrome.storage.local on load
+  // and whenever the popup writes a change (via storage.onChanged).
   let settings = { ...DEFAULT_SETTINGS };
 
+  // Track which DOM nodes we've already sent to the backend so we don't
+  // re-analyze the same post on every mutation.
+  const PROCESSED_ATTR = "data-wb-processed";
+  const COMPOSE_ATTR = "data-wb-compose-attached";
+
+  // Candidate selectors for "post-like" containers. Kept broad + generic so
+  // the extension works across arbitrary sites, not just Twitter/Reddit.
+  const POST_SELECTORS = [
+    'article',
+    '[data-testid="tweet"]',
+    '[data-test-id="post-content"]',
+    '[data-testid="post-container"]',
+    '.Post',
+    '.thing', // old reddit
+  ].join(", ");
+
+  const MIN_TEXT_LENGTH_TO_ANALYZE = 15;
+
+  // ---------------------------------------------------------------------
+  // Settings load + live sync with popup
+  // ---------------------------------------------------------------------
   function loadSettings() {
-    return new Promise((resolve) => {
-      chrome.storage.local.get(
-        ["toxicityThreshold", "userTriggers", "nsfwFilteringEnabled", "draftCheckEnabled", "extensionEnabled"],
-        (stored) => {
-          settings = {
-            toxicityThreshold: stored.toxicityThreshold ?? DEFAULT_SETTINGS.toxicityThreshold,
-            userTriggers: stored.userTriggers ?? DEFAULT_SETTINGS.userTriggers,
-            nsfwFilteringEnabled: stored.nsfwFilteringEnabled ?? DEFAULT_SETTINGS.nsfwFilteringEnabled,
-            draftCheckEnabled: stored.draftCheckEnabled ?? DEFAULT_SETTINGS.draftCheckEnabled,
-            extensionEnabled: stored.extensionEnabled ?? DEFAULT_SETTINGS.extensionEnabled,
-          };
-          resolve(settings);
-        }
-      );
+    chrome.storage.local.get(DEFAULT_SETTINGS, (stored) => {
+      settings = { ...DEFAULT_SETTINGS, ...stored };
     });
   }
 
-  // Re-sync settings whenever the popup changes them
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
     for (const [key, { newValue }] of Object.entries(changes)) {
@@ -56,274 +60,315 @@
     }
   });
 
-  // ---------------------------------------------------------------------
-  // Session stats (for the Mood & Wellbeing dashboard)
-  // ---------------------------------------------------------------------
-  const sessionStart = Date.now();
-  let sessionStats = { toxicBlocked: 0, nsfwBlocked: 0, triggerBlocked: 0 };
+  loadSettings();
+  ensureSessionInitialized();
 
-  function persistSessionStats() {
-    chrome.storage.local.set({
-      sessionStats,
-      sessionStartTimestamp: sessionStart,
+  // ---------------------------------------------------------------------
+  // Session stat helpers (read/written by popup.js too)
+  // ---------------------------------------------------------------------
+  function ensureSessionInitialized() {
+    chrome.storage.local.get(["sessionStart"], (data) => {
+      if (!data.sessionStart) {
+        chrome.storage.local.set({
+          sessionStart: Date.now(),
+          toxicBlockedCount: 0,
+          nsfwBlockedCount: 0,
+          triggerBlockedCount: 0,
+        });
+      }
+    });
+  }
+
+  function incrementBlockedCounter(kind) {
+    const key =
+      kind === "toxic"
+        ? "toxicBlockedCount"
+        : kind === "nsfw"
+        ? "nsfwBlockedCount"
+        : "triggerBlockedCount";
+
+    chrome.storage.local.get([key], (data) => {
+      const current = data[key] || 0;
+      chrome.storage.local.set({ [key]: current + 1 });
     });
   }
 
   // ---------------------------------------------------------------------
-  // Backend calls
+  // Post scanning + backend analysis
   // ---------------------------------------------------------------------
-  async function analyzePost(text, imageUrls) {
+  function collectCandidateBlocks(root) {
+    const blocks = new Set();
+
+    if (root.matches && root.matches(POST_SELECTORS)) blocks.add(root);
+    if (root.querySelectorAll) {
+      root.querySelectorAll(POST_SELECTORS).forEach((el) => blocks.add(el));
+    }
+
+    // Fallback: reasonably-sized text-bearing <div>/<p> blocks that aren't
+    // already inside something we've flagged, for sites with no semantic
+    // post markup at all.
+    if (root.querySelectorAll) {
+      root.querySelectorAll("div, p").forEach((el) => {
+        if (blocks.has(el)) return;
+        const text = (el.innerText || "").trim();
+        if (
+          text.length >= MIN_TEXT_LENGTH_TO_ANALYZE &&
+          el.children.length <= 6 &&
+          !el.closest(`[${PROCESSED_ATTR}]`)
+        ) {
+          blocks.add(el);
+        }
+      });
+    }
+
+    return Array.from(blocks);
+  }
+
+  function extractImageUrls(block) {
+    return Array.from(block.querySelectorAll("img"))
+      .map((img) => img.src)
+      .filter((src) => src && src.startsWith("http"))
+      .slice(0, 5); // cap payload size
+  }
+
+  async function analyzeAndMaybeBlur(block) {
+    if (block.hasAttribute(PROCESSED_ATTR)) return;
+    block.setAttribute(PROCESSED_ATTR, "pending");
+
+    const text = (block.innerText || "").trim();
+    const imageUrls = settings.nsfwFilterEnabled ? extractImageUrls(block) : [];
+
+    if (text.length < MIN_TEXT_LENGTH_TO_ANALYZE && imageUrls.length === 0) {
+      block.setAttribute(PROCESSED_ATTR, "skipped");
+      return;
+    }
+
     try {
       const res = await fetch(`${API_BASE}/analyze-post`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          text: text || "",
-          image_urls: settings.nsfwFilteringEnabled ? imageUrls : [],
+          text,
+          image_urls: imageUrls,
           user_triggers: settings.userTriggers,
           toxicity_threshold: settings.toxicityThreshold,
         }),
       });
-      if (!res.ok) throw new Error(`analyze-post HTTP ${res.status}`);
-      return await res.json();
+
+      if (!res.ok) throw new Error(`Backend returned ${res.status}`);
+      const result = await res.json();
+
+      block.setAttribute(PROCESSED_ATTR, "done");
+
+      if (result.action === "blur") {
+        applyBlurOverlay(block, result);
+      }
     } catch (err) {
-      console.warn("[Wellbeing Buffer] analyze-post failed (is the backend running on :8000?)", err);
-      return null;
+      // Backend unreachable (e.g. not running) — fail open, don't block content.
+      console.warn("[WellbeingBuffer] analyze-post failed:", err);
+      block.setAttribute(PROCESSED_ATTR, "error");
     }
   }
 
-  async function checkDraft(draftText) {
+  // ---------------------------------------------------------------------
+  // Blur overlay + liftable warning badge
+  // ---------------------------------------------------------------------
+  function classifyBadge(result) {
+    if (result.is_toxic) {
+      return { text: "Toxic Content Blocked", cssClass: "wb-badge-toxic" };
+    }
+    if (result.is_nsfw) {
+      return { text: "NSFW Content Blocked", cssClass: "wb-badge-nsfw" };
+    }
+    if (result.trigger_matched) {
+      return {
+        text: `Topic Trigger Matched: '${result.matched_trigger}'`,
+        cssClass: "wb-badge-trigger",
+      };
+    }
+    return { text: "Content Blocked", cssClass: "wb-badge-toxic" };
+  }
+
+  function applyBlurOverlay(block, result) {
+    const computedPosition = window.getComputedStyle(block).position;
+    if (computedPosition === "static") {
+      block.style.position = "relative";
+    }
+
+    block.classList.add("wb-blurred");
+
+    const badgeInfo = classifyBadge(result);
+
+    const overlay = document.createElement("div");
+    overlay.className = "wb-overlay";
+
+    const badge = document.createElement("div");
+    badge.className = `wb-badge ${badgeInfo.cssClass}`;
+    badge.textContent = badgeInfo.text;
+
+    const reasonEl = document.createElement("div");
+    reasonEl.className = "wb-reason";
+    reasonEl.textContent = result.reason;
+
+    const toggleBtn = document.createElement("button");
+    toggleBtn.className = "wb-unhide-btn";
+    toggleBtn.textContent = "Unhide Content";
+    toggleBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const isBlurred = block.classList.toggle("wb-blurred");
+      toggleBtn.textContent = isBlurred ? "Unhide Content" : "Hide Content";
+      overlay.classList.toggle("wb-overlay-hidden", !isBlurred);
+    });
+
+    overlay.appendChild(badge);
+    overlay.appendChild(reasonEl);
+    overlay.appendChild(toggleBtn);
+    block.appendChild(overlay);
+
+    // Record which counter this hit belongs to (priority: toxic > nsfw > trigger,
+    // matching the same precedence used server-side to pick `reason`).
+    if (result.is_toxic) incrementBlockedCounter("toxic");
+    else if (result.is_nsfw) incrementBlockedCounter("nsfw");
+    else if (result.trigger_matched) incrementBlockedCounter("trigger");
+  }
+
+  // ---------------------------------------------------------------------
+  // Pre-post compose-box draft checking
+  // ---------------------------------------------------------------------
+  function findComposeElements(root) {
+    const els = new Set();
+    if (root.matches && root.matches('textarea, [contenteditable="true"]')) {
+      els.add(root);
+    }
+    if (root.querySelectorAll) {
+      root
+        .querySelectorAll('textarea, [contenteditable="true"]')
+        .forEach((el) => els.add(el));
+    }
+    return Array.from(els);
+  }
+
+  function getElementText(el) {
+    return el.tagName === "TEXTAREA" ? el.value : el.innerText;
+  }
+
+  function attachComposeListener(el) {
+    if (el.hasAttribute(COMPOSE_ATTR)) return;
+    el.setAttribute(COMPOSE_ATTR, "true");
+
+    let debounceTimer = null;
+
+    el.addEventListener("input", () => {
+      if (!settings.draftCheckEnabled) return;
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => checkDraft(el), 600);
+    });
+  }
+
+  async function checkDraft(el) {
+    const draftText = (getElementText(el) || "").trim();
+    removeDraftAlert(el);
+
+    if (draftText.length < MIN_TEXT_LENGTH_TO_ANALYZE) return;
+
     try {
       const res = await fetch(`${API_BASE}/check-draft`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ draft_text: draftText }),
       });
-      if (!res.ok) throw new Error(`check-draft HTTP ${res.status}`);
-      return await res.json();
+      if (!res.ok) throw new Error(`Backend returned ${res.status}`);
+      const result = await res.json();
+
+      if (result.is_risky) {
+        showDraftAlert(el, result);
+      }
     } catch (err) {
-      console.warn("[Wellbeing Buffer] check-draft failed", err);
-      return null;
+      console.warn("[WellbeingBuffer] check-draft failed:", err);
     }
   }
 
-  // ---------------------------------------------------------------------
-  // DOM: identifying "post-like" nodes generically across platforms
-  // ---------------------------------------------------------------------
-  // Heuristic selector list — broad enough to work across Twitter/X, Reddit,
-  // and generic article/comment containers without a platform-specific
-  // scraper for every site.
-  const POST_SELECTORS = [
-    "article",
-    "[data-testid='tweet']",
-    "[data-testid='cellInnerDiv']",
-    "shreddit-comment",
-    "shreddit-post",
-    ".Comment",
-    "[role='article']",
-  ];
-
-  const processedNodes = new WeakSet();
-
-  function extractTextAndImages(node) {
-    const text = (node.innerText || "").trim().slice(0, 2000);
-    const images = Array.from(node.querySelectorAll("img"))
-      .map((img) => img.src)
-      .filter((src) => src && src.startsWith("http"))
-      .slice(0, 5); // cap per-post to keep requests light
-    return { text, images };
-  }
-
-  function buildOverlay(reason, badgeClass) {
-    const overlay = document.createElement("div");
-    overlay.className = "wb-overlay";
-
-    const badge = document.createElement("span");
-    badge.className = `wb-badge ${badgeClass}`;
-    badge.textContent = reason;
-
-    const button = document.createElement("button");
-    button.className = "wb-unhide-btn";
-    button.textContent = "Unhide Content";
-
-    overlay.appendChild(badge);
-    overlay.appendChild(button);
-    return { overlay, button };
-  }
-
-  function badgeClassFor(result) {
-    if (result.is_toxic) return "wb-badge-toxic";
-    if (result.is_nsfw) return "wb-badge-nsfw";
-    if (result.trigger_matched) return "wb-badge-trigger";
-    return "wb-badge-toxic";
-  }
-
-  function applyBlur(node, result) {
-    // Wrap so the overlay can be absolutely positioned relative to the post
-    if (getComputedStyle(node).position === "static") {
-      node.style.position = "relative";
+  function removeDraftAlert(el) {
+    const existing = el._wbAlertBox;
+    if (existing && existing.parentNode) {
+      existing.parentNode.removeChild(existing);
     }
-    node.classList.add("wb-wrapper", "wb-blurred");
+    el._wbAlertBox = null;
+  }
 
-    const { overlay, button } = buildOverlay(result.reason, badgeClassFor(result));
-    node.appendChild(overlay);
+  function showDraftAlert(el, result) {
+    const alertBox = document.createElement("div");
+    alertBox.className = "wb-draft-alert";
 
-    let revealed = false;
-    button.addEventListener("click", (e) => {
-      e.preventDefault();
+    const title = document.createElement("div");
+    title.className = "wb-draft-alert-title";
+    title.textContent = `⚠ This post may come across as toxic (score ${result.toxicity_score.toFixed(
+      2
+    )})`;
+
+    const suggestion = document.createElement("div");
+    suggestion.className = "wb-draft-alert-suggestion";
+    suggestion.textContent = result.suggestion || "";
+
+    const useBtn = document.createElement("button");
+    useBtn.className = "wb-draft-alert-use-btn";
+    useBtn.textContent = "Use Suggestion";
+    useBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      revealed = !revealed;
-      node.classList.toggle("wb-revealed", revealed);
-      overlay.classList.toggle("wb-hidden", revealed);
-      button.textContent = revealed ? "Hide Again" : "Unhide Content";
+      if (el.tagName === "TEXTAREA") {
+        el.value = result.suggestion;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      } else {
+        el.innerText = result.suggestion;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      removeDraftAlert(el);
     });
 
-    // Update session stats once per node
-    if (result.is_toxic) sessionStats.toxicBlocked += 1;
-    if (result.is_nsfw) sessionStats.nsfwBlocked += 1;
-    if (result.trigger_matched) sessionStats.triggerBlocked += 1;
-    persistSessionStats();
-  }
+    const dismissBtn = document.createElement("button");
+    dismissBtn.className = "wb-draft-alert-dismiss-btn";
+    dismissBtn.textContent = "Dismiss";
+    dismissBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      removeDraftAlert(el);
+    });
 
-  async function processNode(node) {
-    if (!settings.extensionEnabled) return;
-    if (processedNodes.has(node)) return;
-    processedNodes.add(node);
+    alertBox.appendChild(title);
+    alertBox.appendChild(suggestion);
+    alertBox.appendChild(useBtn);
+    alertBox.appendChild(dismissBtn);
 
-    const { text, images } = extractTextAndImages(node);
-    if (!text && images.length === 0) return;
-
-    const result = await analyzePost(text, images);
-    if (result && result.action === "blur") {
-      applyBlur(node, result);
+    // Insert right after the compose element in the DOM.
+    if (el.parentNode) {
+      el.parentNode.insertBefore(alertBox, el.nextSibling);
     }
-  }
-
-  function scanForPosts(root = document) {
-    const nodes = new Set();
-    for (const selector of POST_SELECTORS) {
-      root.querySelectorAll(selector).forEach((n) => nodes.add(n));
-    }
-    nodes.forEach((node) => processNode(node));
+    el._wbAlertBox = alertBox;
   }
 
   // ---------------------------------------------------------------------
-  // MutationObserver — handles infinite-scroll feeds
+  // MutationObserver wiring
   // ---------------------------------------------------------------------
+  function processNode(node) {
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+    collectCandidateBlocks(node).forEach((block) => {
+      // requestIdleCallback keeps scanning from janking the scroll feed;
+      // falls back to setTimeout on browsers without it.
+      const schedule = window.requestIdleCallback || ((cb) => setTimeout(cb, 50));
+      schedule(() => analyzeAndMaybeBlur(block));
+    });
+
+    findComposeElements(node).forEach(attachComposeListener);
+  }
+
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
-      mutation.addedNodes.forEach((added) => {
-        if (added.nodeType !== Node.ELEMENT_NODE) return;
-        scanForPosts(added.parentNode ? added : document);
-        // Also check the added node itself against selectors directly
-        for (const selector of POST_SELECTORS) {
-          if (added.matches && added.matches(selector)) {
-            processNode(added);
-          }
-        }
-      });
+      mutation.addedNodes.forEach(processNode);
     }
   });
 
-  function startObserving() {
-    observer.observe(document.body, { childList: true, subtree: true });
-    scanForPosts(); // initial pass for content already on the page
-  }
+  observer.observe(document.body, { childList: true, subtree: true });
 
-  // ---------------------------------------------------------------------
-  // Pre-post compose check (debounced)
-  // ---------------------------------------------------------------------
-  function debounce(fn, delay) {
-    let timer = null;
-    return (...args) => {
-      clearTimeout(timer);
-      timer = setTimeout(() => fn(...args), delay);
-    };
-  }
-
-  function findOrCreateWarningBox(inputEl) {
-    let box = inputEl._wbWarningBox;
-    if (box && document.body.contains(box)) return box;
-
-    box = document.createElement("div");
-    box.className = "wb-draft-warning";
-    box.style.display = "none";
-    inputEl._wbWarningBox = box;
-
-    // Insert right after the input element (or its closest block parent)
-    const parent = inputEl.parentElement || document.body;
-    parent.insertBefore(box, inputEl.nextSibling);
-    return box;
-  }
-
-  function renderDraftWarning(inputEl, result) {
-    const box = findOrCreateWarningBox(inputEl);
-    if (!result || !result.is_risky) {
-      box.style.display = "none";
-      return;
-    }
-    box.style.display = "block";
-    box.innerHTML = `<strong>⚠ This might come across as harsh</strong> (toxicity score: ${(
-      result.toxicity_score * 100
-    ).toFixed(0)}%)<span class="wb-suggestion">Suggested rephrase: "${result.suggestion}"</span>`;
-  }
-
-  const debouncedDraftCheck = debounce(async (inputEl) => {
-    if (!settings.draftCheckEnabled) return;
-    const text = inputEl.value !== undefined ? inputEl.value : inputEl.innerText;
-    if (!text || text.trim().length < 4) {
-      renderDraftWarning(inputEl, null);
-      return;
-    }
-    const result = await checkDraft(text);
-    renderDraftWarning(inputEl, result);
-  }, 600);
-
-  function attachComposeListeners(root = document) {
-    const composeSelectors = [
-      "textarea",
-      "[contenteditable='true']",
-      "input[type='text']",
-      "div[role='textbox']",
-    ];
-    composeSelectors.forEach((selector) => {
-      root.querySelectorAll(selector).forEach((el) => {
-        if (el._wbListenerAttached) return;
-        el._wbListenerAttached = true;
-        el.addEventListener("input", () => debouncedDraftCheck(el));
-      });
-    });
-  }
-
-  const composeObserver = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      if (mutation.addedNodes.length > 0) {
-        // Re-scan the whole document for new compose boxes; cheap because
-        // attachComposeListeners skips elements it has already wired up.
-        attachComposeListeners(document);
-        break;
-      }
-    }
-  });
-
-  function startComposeWatching() {
-    attachComposeListeners();
-    composeObserver.observe(document.body, { childList: true, subtree: true });
-  }
-
-  // ---------------------------------------------------------------------
-  // Boot
-  // ---------------------------------------------------------------------
-  (async function init() {
-    await loadSettings();
-    if (!document.body) {
-      window.addEventListener("DOMContentLoaded", () => {
-        startObserving();
-        startComposeWatching();
-      });
-    } else {
-      startObserving();
-      startComposeWatching();
-    }
-  })();
+  // Initial pass over content already on the page at load time.
+  processNode(document.body);
 })();

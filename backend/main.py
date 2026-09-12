@@ -3,27 +3,36 @@ main.py
 --------
 FastAPI backend for the AI-Powered Wellbeing Buffer.
 
-Endpoints:
-    POST /analyze-post              -> toxicity + NSFW + semantic trigger check
-    POST /check-draft                -> pre-post toxicity check + rephrase suggestion
-    POST /train-custom-classifier    -> live retrain of the self-owned toxicity model
-    POST /calculate-mood-impact      -> session mood/wellbeing scoring
-    GET  /health                     -> quick status check for the extension popup
+Every model here is trained from scratch by this repo's own training
+scripts — nothing pretrained, nothing fetched from a commercial API:
 
-Model precedence (toxicity):
-    1. PRIMARY   -> custom_toxic_model.joblib (TF-IDF + LogisticRegression,
-                    trained by this team via train_model.py) — proves
-                    self-trained-model capability.
-    2. FALLBACK  -> Detoxify('original-small'), used only if the custom
-                    model file is missing or fails to load.
+  - Toxicity classifier   -> train_model.py            -> custom_toxic_model.joblib
+        TF-IDF + LogisticRegression, trained on data/toxic_sample.csv.
+  - Image NSFW classifier -> train_nsfw_model.py        -> nsfw_image_model.joblib
+        LogisticRegression over hand-engineered pixel/color features
+        (image_features.py), trained on procedurally generated synthetic
+        images (no pretrained CNN, no NudeNet).
+  - Semantic trigger match-> train_trigger_embedder.py  -> trigger_embedder.joblib
+        TF-IDF + Truncated SVD (LSA), trained on our own text corpus
+        (no sentence-transformers, no pretrained embeddings).
+  - Text NSFW             -> severe-toxicity signal (from the toxicity
+        classifier above) + explicit-word pattern matching. No extra model.
+  - Draft rephrasing      -> deterministic rule-based rewriter. No model,
+        no LLM call of any kind.
+  - Mood impact            -> closed-form formula over session stats.
 
-No commercial LLM APIs (OpenAI/Anthropic/Gemini) are used anywhere in this
-file. All inference is local/self-hosted.
+If any .joblib file is missing at startup, main.py trains it itself on the
+spot by calling straight into that model's train_and_save() — the fallback
+is "train it now", never "load someone else's pretrained weights".
+
+Run with:
+    uvicorn main:app --reload --port 8000
 """
 
-import io
 import os
 import re
+import io
+import logging
 import subprocess
 import sys
 from typing import List, Optional
@@ -31,26 +40,30 @@ from typing import List, Optional
 import joblib
 import numpy as np
 import requests
+from PIL import Image
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from image_features import extract_image_features
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("wellbeing-backend")
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "custom_toxic_model.joblib")
-TRAIN_SCRIPT_PATH = os.path.join(BASE_DIR, "train_model.py")
+TOXIC_MODEL_PATH = os.path.join(BASE_DIR, "custom_toxic_model.joblib")
+NSFW_MODEL_PATH = os.path.join(BASE_DIR, "nsfw_image_model.joblib")
+TRIGGER_MODEL_PATH = os.path.join(BASE_DIR, "trigger_embedder.joblib")
+TRAIN_TOXIC_SCRIPT = os.path.join(BASE_DIR, "train_model.py")
 
 # ---------------------------------------------------------------------------
-# App setup
+# FastAPI app + CORS
 # ---------------------------------------------------------------------------
-app = FastAPI(
-    title="AI Wellbeing Buffer — Backend",
-    description="Local ML backend for pre-render content filtering.",
-    version="1.0.0",
-)
+app = FastAPI(title="AI Wellbeing Buffer API", version="2.0.0")
 
-# The Chrome extension calls this API from content-script/popup contexts,
-# which run against arbitrary page origins -> allow all origins for the
-# hackathon prototype. Lock this down to your extension's origin in prod.
+# The Chrome extension calls this API from content-script/popup contexts on
+# arbitrary sites, so we allow broadly here. In production, lock this down
+# to specific extension IDs.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -60,245 +73,34 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# Lazy-loaded model singletons
+# Global model handles — all three are self-trained sklearn artifacts
 # ---------------------------------------------------------------------------
-_custom_toxic_model = None            # sklearn Pipeline (primary)
-_detoxify_model = None                # Detoxify instance (fallback)
-_sentence_model = None                # SentenceTransformer for semantic triggers
-_nsfw_image_model = None              # NudeNet detector
+toxic_model = None       # sklearn Pipeline: TfidfVectorizer + LogisticRegression
+nsfw_model = None        # sklearn LogisticRegression over image_features.py vectors
+trigger_embedder = None  # sklearn Pipeline: TfidfVectorizer + TruncatedSVD (LSA)
 
-_using_fallback_toxicity = False
-
-# Simple explicit-language wordlist for text-based NSFW pattern matching.
-# Intentionally coarse (word-boundary regex) — this supplements the model
-# score, it isn't the sole signal.
+# Explicit-word pattern list used for text-based NSFW flagging. Kept
+# intentionally coarse; this is a pattern-match layer that runs alongside
+# (not instead of) the toxicity-derived severe-toxicity signal.
 EXPLICIT_TEXT_PATTERNS = [
     r"\bnsfw\b",
     r"\bxxx\b",
-    r"\bexplicit content\b",
-    r"\bnude[sz]?\b",
     r"\bporn\w*\b",
+    r"\bnud(e|ity)\w*\b",
+    r"\bexplicit content\b",
+    r"\bonlyfans\b",
+    r"\bsex\s?tape\b",
 ]
-_EXPLICIT_TEXT_REGEX = re.compile("|".join(EXPLICIT_TEXT_PATTERNS), re.IGNORECASE)
+EXPLICIT_TEXT_REGEX = re.compile("|".join(EXPLICIT_TEXT_PATTERNS), re.IGNORECASE)
 
-
-def _load_custom_toxic_model():
-    """Attempts to load the team's self-trained joblib model."""
-    global _custom_toxic_model
-    if _custom_toxic_model is not None:
-        return _custom_toxic_model
-    if os.path.exists(MODEL_PATH):
-        try:
-            _custom_toxic_model = joblib.load(MODEL_PATH)
-            print(f"[main.py] Loaded custom toxicity model from {MODEL_PATH}")
-        except Exception as exc:
-            print(f"[main.py] Failed to load custom model ({exc}); will use fallback.")
-            _custom_toxic_model = None
-    return _custom_toxic_model
-
-
-def _load_detoxify_fallback():
-    """Lazily loads Detoxify('original-small') as the fallback toxicity model."""
-    global _detoxify_model
-    if _detoxify_model is not None:
-        return _detoxify_model
-    try:
-        from detoxify import Detoxify
-
-        _detoxify_model = Detoxify("original-small")
-        print("[main.py] Loaded Detoxify('original-small') fallback model.")
-    except Exception as exc:
-        print(f"[main.py] Could not load Detoxify fallback ({exc}).")
-        _detoxify_model = None
-    return _detoxify_model
-
-
-def _load_sentence_model():
-    """Lazily loads the sentence-transformer used for semantic trigger matching."""
-    global _sentence_model
-    if _sentence_model is not None:
-        return _sentence_model
-    try:
-        from sentence_transformers import SentenceTransformer
-
-        _sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
-        print("[main.py] Loaded SentenceTransformer('all-MiniLM-L6-v2').")
-    except Exception as exc:
-        print(f"[main.py] Could not load sentence-transformer ({exc}).")
-        _sentence_model = None
-    return _sentence_model
-
-
-def _load_nsfw_image_model():
-    """Lazily loads the NudeNet image classifier for NSFW image tagging."""
-    global _nsfw_image_model
-    if _nsfw_image_model is not None:
-        return _nsfw_image_model
-    try:
-        from nudenet import NudeClassifier
-
-        _nsfw_image_model = NudeClassifier()
-        print("[main.py] Loaded NudeNet NudeClassifier.")
-    except Exception as exc:
-        print(f"[main.py] Could not load NudeNet ({exc}).")
-        _nsfw_image_model = None
-    return _nsfw_image_model
-
-
-@app.on_event("startup")
-def on_startup():
-    """Warm-load the primary model at startup; fallback is loaded lazily on first use."""
-    global _using_fallback_toxicity
-    model = _load_custom_toxic_model()
-    _using_fallback_toxicity = model is None
-    if _using_fallback_toxicity:
-        print("[main.py] custom_toxic_model.joblib not found -> "
-              "will use Detoxify fallback on first request. "
-              "Run `python train_model.py` (or call /train-custom-classifier) "
-              "to enable the primary self-trained model.")
+NSFW_IMAGE_CONFIDENCE_THRESHOLD = 0.60
+SEMANTIC_TRIGGER_THRESHOLD = 0.40
+DRAFT_RISK_THRESHOLD = 0.45
+SEVERE_TOXICITY_THRESHOLD = 0.75  # stricter than the general toxicity flag
 
 
 # ---------------------------------------------------------------------------
-# Core toxicity scoring (shared by /analyze-post and /check-draft)
-# ---------------------------------------------------------------------------
-def score_toxicity(text: str) -> float:
-    """
-    Returns a toxicity probability in [0, 1].
-    Tries the primary custom model first; falls back to Detoxify.
-    """
-    global _using_fallback_toxicity
-
-    text = (text or "").strip()
-    if not text:
-        return 0.0
-
-    model = _load_custom_toxic_model()
-    if model is not None:
-        try:
-            proba = model.predict_proba([text])[0]
-            # class order follows the fitted labels_; find index of class "1"
-            classes = list(model.classes_)
-            idx = classes.index(1) if 1 in classes else int(np.argmax(proba))
-            _using_fallback_toxicity = False
-            return float(proba[idx])
-        except Exception as exc:
-            print(f"[main.py] Primary model inference failed ({exc}); falling back.")
-
-    # Fallback path
-    detox = _load_detoxify_fallback()
-    if detox is not None:
-        try:
-            results = detox.predict(text)
-            _using_fallback_toxicity = True
-            return float(results.get("toxicity", 0.0))
-        except Exception as exc:
-            print(f"[main.py] Detoxify inference failed ({exc}).")
-
-    # Last-resort heuristic if neither model is available (keeps API usable
-    # in a bare-bones dev environment with no model files/deps yet).
-    crude_flags = ["idiot", "stupid", "hate you", "kill yourself", "pathetic", "worthless"]
-    hits = sum(1 for w in crude_flags if w in text.lower())
-    return min(1.0, hits * 0.35)
-
-
-def is_text_nsfw(text: str, toxicity_score: float) -> bool:
-    """Flags text as NSFW via explicit-word pattern match OR very high severe toxicity."""
-    if _EXPLICIT_TEXT_REGEX.search(text or ""):
-        return True
-    # Very high toxicity scores often co-occur with graphic/explicit abuse language.
-    return toxicity_score >= 0.85
-
-
-def is_image_nsfw(image_url: str, confidence_threshold: float = 0.60) -> bool:
-    """Downloads an image and classifies it as explicit/graphic via NudeNet."""
-    model = _load_nsfw_image_model()
-    if model is None:
-        return False
-    try:
-        resp = requests.get(image_url, timeout=5)
-        resp.raise_for_status()
-        tmp_path = os.path.join(BASE_DIR, "_tmp_nsfw_check.jpg")
-        with open(tmp_path, "wb") as f:
-            f.write(resp.content)
-        result = model.classify(tmp_path)
-        os.remove(tmp_path)
-        # NudeClassifier.classify -> {path: {"safe": p_safe, "unsafe": p_unsafe}}
-        scores = result.get(tmp_path, {})
-        unsafe_score = scores.get("unsafe", 0.0)
-        return unsafe_score > confidence_threshold
-    except Exception as exc:
-        print(f"[main.py] Image NSFW check failed for {image_url}: {exc}")
-        return False
-
-
-def semantic_trigger_match(text: str, user_triggers: List[str], threshold: float = 0.40):
-    """
-    Embeds `text` and each trigger phrase, returns (matched: bool, best_trigger: str|None,
-    best_score: float) using cosine similarity — catches paraphrases, not just keywords.
-    """
-    if not user_triggers:
-        return False, None, 0.0
-
-    model = _load_sentence_model()
-    if model is None:
-        # Graceful degradation: substring match if the embedding model isn't loaded.
-        lowered = (text or "").lower()
-        for trig in user_triggers:
-            if trig.strip() and trig.strip().lower() in lowered:
-                return True, trig, 1.0
-        return False, None, 0.0
-
-    try:
-        from sentence_transformers import util
-
-        post_vec = model.encode(text, convert_to_tensor=True)
-        trigger_vecs = model.encode(user_triggers, convert_to_tensor=True)
-        sims = util.cos_sim(post_vec, trigger_vecs)[0]
-        best_idx = int(np.argmax(sims.cpu().numpy()))
-        best_score = float(sims[best_idx])
-        if best_score > threshold:
-            return True, user_triggers[best_idx], best_score
-        return False, None, best_score
-    except Exception as exc:
-        print(f"[main.py] Semantic trigger matching failed ({exc}).")
-        return False, None, 0.0
-
-
-def suggest_rephrase(text: str) -> str:
-    """
-    Rule-based constructive rephrasing suggestion (no commercial LLM API).
-    Softens common hostile constructs; this is intentionally simple/template
-    based to satisfy the "no commercial LLM doing all the work" constraint.
-    """
-    replacements = [
-        (r"\byou'?re\s+(an?\s+)?idiot\b", "I disagree with your point"),
-        (r"\byou\s+are\s+(an?\s+)?idiot\b", "I disagree with your point"),
-        (r"\byou'?re\s+(an?\s+)?(moron|stupid|dumb)\b", "I think you're mistaken here"),
-        (r"\byou\s+are\s+(an?\s+)?(moron|stupid|dumb)\b", "I think you're mistaken here"),
-        (r"\bshut up\b", "please let me finish"),
-        (r"\bi hate you\b", "I'm really frustrated right now"),
-        (r"\bkill yourself\b", "I strongly disagree with you"),
-        (r"\byou\s+are\s+(pathetic|worthless|garbage|trash)\b", "I don't agree with this at all"),
-        (r"\bshut\s*up\b", "please stop for a second"),
-    ]
-    rephrased = text
-    for pattern, replacement in replacements:
-        rephrased = re.sub(pattern, replacement, rephrased, flags=re.IGNORECASE)
-
-    if rephrased == text:
-        # Generic softening fallback: strip repeated punctuation/caps shouting
-        rephrased = re.sub(r"!{2,}", "!", rephrased)
-        rephrased = re.sub(r"\b[A-Z]{4,}\b", lambda m: m.group(0).title(), rephrased)
-        if rephrased == text:
-            rephrased = (
-                "Consider rewording this more constructively — e.g. explain "
-                "why you disagree instead of attacking the other person."
-            )
-    return rephrased
-
-
-# ---------------------------------------------------------------------------
-# Request / response schemas
+# Pydantic schemas
 # ---------------------------------------------------------------------------
 class AnalyzePostRequest(BaseModel):
     text: str = ""
@@ -308,11 +110,11 @@ class AnalyzePostRequest(BaseModel):
 
 
 class AnalyzePostResponse(BaseModel):
-    action: str            # "blur" | "show"
+    action: str  # "blur" | "show"
     is_toxic: bool
     is_nsfw: bool
     trigger_matched: bool
-    matched_trigger: Optional[str]
+    matched_trigger: Optional[str] = None
     reason: str
     toxicity_score: float
 
@@ -324,14 +126,14 @@ class CheckDraftRequest(BaseModel):
 class CheckDraftResponse(BaseModel):
     is_risky: bool
     toxicity_score: float
-    suggestion: Optional[str]
+    suggestion: Optional[str] = None
 
 
 class MoodImpactRequest(BaseModel):
     session_duration_minutes: float
-    toxic_blocked_count: int = 0
-    nsfw_blocked_count: int = 0
-    trigger_blocked_count: int = 0
+    toxic_blocked_count: int
+    nsfw_blocked_count: int
+    trigger_blocked_count: int
 
 
 class MoodImpactResponse(BaseModel):
@@ -340,44 +142,224 @@ class MoodImpactResponse(BaseModel):
     summary: str
 
 
+class TrainResponse(BaseModel):
+    success: bool
+    message: str
+    n_samples: Optional[int] = None
+    holdout_accuracy: Optional[float] = None
+
+
+# ---------------------------------------------------------------------------
+# Startup: load each self-trained model, training it on the spot if missing
+# ---------------------------------------------------------------------------
+@app.on_event("startup")
+def load_models_on_startup():
+    global toxic_model, nsfw_model, trigger_embedder
+
+    # 1) Toxicity classifier
+    if not os.path.exists(TOXIC_MODEL_PATH):
+        logger.info("custom_toxic_model.joblib not found — training it now.")
+        from train_model import train_and_save as train_toxic
+
+        train_toxic()
+    toxic_model = joblib.load(TOXIC_MODEL_PATH)
+    logger.info("Loaded self-trained toxicity classifier.")
+
+    # 2) Image NSFW classifier
+    if not os.path.exists(NSFW_MODEL_PATH):
+        logger.info("nsfw_image_model.joblib not found — training it now.")
+        from train_nsfw_model import train_and_save as train_nsfw
+
+        train_nsfw()
+    nsfw_model = joblib.load(NSFW_MODEL_PATH)
+    logger.info("Loaded self-trained NSFW image classifier.")
+
+    # 3) Semantic trigger embedder
+    if not os.path.exists(TRIGGER_MODEL_PATH):
+        logger.info("trigger_embedder.joblib not found — training it now.")
+        from train_trigger_embedder import train_and_save as train_embedder
+
+        train_embedder()
+    trigger_embedder = joblib.load(TRIGGER_MODEL_PATH)
+    logger.info("Loaded self-trained semantic trigger embedder (TF-IDF + LSA).")
+
+    logger.info("All models loaded. No pretrained weights or external APIs were used.")
+
+
+# ---------------------------------------------------------------------------
+# Core scoring helpers
+# ---------------------------------------------------------------------------
+def score_text_toxicity(text: str) -> float:
+    """Toxicity probability in [0, 1] from the self-trained TF-IDF + LogisticRegression pipeline."""
+    if not text or not text.strip():
+        return 0.0
+
+    proba = toxic_model.predict_proba([text])[0]
+    classes = list(toxic_model.named_steps["clf"].classes_)
+    toxic_idx = classes.index(1) if 1 in classes else int(np.argmax(proba))
+    return float(proba[toxic_idx])
+
+
+def text_contains_explicit_pattern(text: str) -> bool:
+    return bool(EXPLICIT_TEXT_REGEX.search(text or ""))
+
+
+def is_text_nsfw(text: str, toxicity_score: float) -> bool:
+    """
+    Text NSFW = severe toxicity signal OR explicit-word pattern match.
+    We don't have a separate "severity" head, so we reuse the same
+    self-trained toxicity score at a stricter threshold as the severity proxy.
+    """
+    return toxicity_score >= SEVERE_TOXICITY_THRESHOLD or text_contains_explicit_pattern(text)
+
+
+def check_images_nsfw(image_urls: List[str]) -> bool:
+    """
+    Downloads each image, extracts the hand-engineered feature vector
+    (image_features.py), and runs it through the self-trained
+    LogisticRegression NSFW classifier. Returns True if ANY image is
+    classified explicit above NSFW_IMAGE_CONFIDENCE_THRESHOLD. Network/
+    decode failures on individual images are logged and skipped rather
+    than failing the whole request.
+    """
+    if not image_urls:
+        return False
+
+    for url in image_urls:
+        try:
+            resp = requests.get(url, timeout=6)
+            resp.raise_for_status()
+
+            img = Image.open(io.BytesIO(resp.content))
+            img.load()  # force decode / validate it's a real image
+
+            features = extract_image_features(img).reshape(1, -1)
+            proba = nsfw_model.predict_proba(features)[0]
+            classes = list(nsfw_model.classes_)
+            explicit_idx = classes.index(1) if 1 in classes else int(np.argmax(proba))
+            explicit_confidence = float(proba[explicit_idx])
+
+            if explicit_confidence > NSFW_IMAGE_CONFIDENCE_THRESHOLD:
+                return True
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Skipping image %s during NSFW check (%s).", url, exc)
+            continue
+
+    return False
+
+
+def embed_texts(texts: List[str]) -> np.ndarray:
+    """
+    Push text through the self-trained TF-IDF + TruncatedSVD (LSA) pipeline
+    and L2-normalize, so a dot product gives cosine similarity.
+    """
+    vecs = trigger_embedder.transform(texts)
+    norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+    norms[norms == 0] = 1e-9
+    return vecs / norms
+
+
+def find_matching_trigger(text: str, user_triggers: List[str]) -> Optional[str]:
+    """
+    Computes cosine similarity, in our self-trained LSA space, between the
+    post's embedding and each user trigger phrase's embedding. Returns the
+    best-matching trigger if it exceeds SEMANTIC_TRIGGER_THRESHOLD, else None.
+    """
+    if not text or not text.strip() or not user_triggers:
+        return None
+
+    post_vec = embed_texts([text])[0]
+    trigger_vecs = embed_texts(user_triggers)
+
+    similarities = trigger_vecs @ post_vec
+    best_idx = int(np.argmax(similarities))
+    best_score = float(similarities[best_idx])
+
+    if best_score > SEMANTIC_TRIGGER_THRESHOLD:
+        return user_triggers[best_idx]
+    return None
+
+
+def generate_rephrase_suggestion(draft_text: str) -> str:
+    """
+    Produces a constructive rephrasing suggestion WITHOUT calling any model
+    or API. This is a deterministic, rule-based rewriter: it softens a small
+    dictionary of common hostile phrases and wraps the result in an "I"
+    statement, a well-established de-escalation pattern. It's not as fluent
+    as an LLM rewrite, but it keeps this feature 100% local and API-free.
+    """
+    softeners = {
+        r"\byou'?re? (an? )?idiot\b": "I disagree with you",
+        r"\bshut up\b": "please let me finish",
+        r"\bstupid\b": "mistaken",
+        r"\bhate\b": "strongly dislike",
+        r"\bworthless\b": "not adding value here",
+        r"\bpathetic\b": "disappointing",
+        r"\bmoron\b": "person who sees it differently",
+        r"\bloser\b": "person",
+        r"\bkill yourself\b": "please reconsider this",
+        r"\bdisgust(s|ing)?\b": "concern(s)",
+        r"\bgarbage\b": "not great",
+        r"\btrash\b": "not great",
+    }
+
+    rewritten = draft_text
+    changed = False
+    for pattern, replacement in softeners.items():
+        new_text, n = re.subn(pattern, replacement, rewritten, flags=re.IGNORECASE)
+        if n > 0:
+            changed = True
+            rewritten = new_text
+
+    if not changed:
+        rewritten = (
+            "Consider leading with how you feel rather than an accusation, e.g.: "
+            f"\"I see this differently than you do because...\" "
+            f"(original draft: \"{draft_text.strip()}\")"
+        )
+    else:
+        rewritten = rewritten.strip().capitalize()
+
+    return rewritten
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
-@app.get("/health")
-def health():
+@app.get("/")
+def health_check():
     return {
         "status": "ok",
-        "primary_model_loaded": _load_custom_toxic_model() is not None,
-        "using_fallback_toxicity": _using_fallback_toxicity,
+        "models": {
+            "toxicity_classifier": "self-trained (TF-IDF + LogisticRegression)",
+            "nsfw_image_classifier": "self-trained (hand-engineered features + LogisticRegression)",
+            "trigger_embedder": "self-trained (TF-IDF + TruncatedSVD / LSA)",
+        },
     }
 
 
 @app.post("/analyze-post", response_model=AnalyzePostResponse)
 def analyze_post(payload: AnalyzePostRequest):
-    toxicity_score = score_toxicity(payload.text)
+    toxicity_score = score_text_toxicity(payload.text)
     is_toxic = toxicity_score >= payload.toxicity_threshold
 
-    text_nsfw = is_text_nsfw(payload.text, toxicity_score)
-    image_nsfw = any(is_image_nsfw(url) for url in payload.image_urls)
-    is_nsfw = text_nsfw or image_nsfw
+    is_nsfw = is_text_nsfw(payload.text, toxicity_score)
+    if not is_nsfw and payload.image_urls:
+        is_nsfw = check_images_nsfw(payload.image_urls)
 
-    trigger_matched, matched_trigger, _ = semantic_trigger_match(
-        payload.text, payload.user_triggers
-    )
+    matched_trigger = find_matching_trigger(payload.text, payload.user_triggers)
+    trigger_matched = matched_trigger is not None
 
-    should_blur = is_toxic or is_nsfw or trigger_matched
-    action = "blur" if should_blur else "show"
-
-    if is_toxic and is_nsfw:
-        reason = "Toxic and NSFW content detected"
-    elif is_toxic:
-        reason = "Toxic Content Blocked"
+    if is_toxic:
+        reason = f"Toxicity score {toxicity_score:.2f} met/exceeded threshold {payload.toxicity_threshold:.2f}."
     elif is_nsfw:
-        reason = "NSFW Content Blocked"
+        reason = "Content flagged as NSFW (explicit text pattern, severe toxicity, or image classifier)."
     elif trigger_matched:
-        reason = f"Topic Trigger Matched: '{matched_trigger}'"
+        reason = f"Semantic similarity to trigger topic '{matched_trigger}' exceeded {SEMANTIC_TRIGGER_THRESHOLD}."
     else:
-        reason = "No issues detected"
+        reason = "No toxicity, NSFW, or trigger-topic signals detected."
+
+    action = "blur" if (is_toxic or is_nsfw or trigger_matched) else "show"
 
     return AnalyzePostResponse(
         action=action,
@@ -392,9 +374,11 @@ def analyze_post(payload: AnalyzePostRequest):
 
 @app.post("/check-draft", response_model=CheckDraftResponse)
 def check_draft(payload: CheckDraftRequest):
-    score = score_toxicity(payload.draft_text)
-    is_risky = score >= 0.45
-    suggestion = suggest_rephrase(payload.draft_text) if is_risky else None
+    score = score_text_toxicity(payload.draft_text)
+    is_risky = score >= DRAFT_RISK_THRESHOLD
+
+    suggestion = generate_rephrase_suggestion(payload.draft_text) if is_risky else None
+
     return CheckDraftResponse(
         is_risky=is_risky,
         toxicity_score=round(score, 4),
@@ -402,69 +386,92 @@ def check_draft(payload: CheckDraftRequest):
     )
 
 
-@app.post("/train-custom-classifier")
+@app.post("/train-custom-classifier", response_model=TrainResponse)
 def train_custom_classifier():
     """
-    Re-runs train_model.py as a subprocess (proves live self-training during
-    judging), then reloads the freshly-saved model into memory.
+    Programmatically re-runs train_model.py as a subprocess (so training
+    happens in a clean process), then hot-reloads the resulting joblib file
+    into memory so subsequent /analyze-post and /check-draft calls
+    immediately use the freshly retrained model. Useful for demoing live
+    self-training to judges.
     """
-    global _custom_toxic_model, _using_fallback_toxicity
+    global toxic_model
 
     try:
         result = subprocess.run(
-            [sys.executable, TRAIN_SCRIPT_PATH],
+            [sys.executable, TRAIN_TOXIC_SCRIPT],
             cwd=BASE_DIR,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=120,
         )
     except subprocess.TimeoutExpired:
-        return {"status": "error", "message": "Training timed out after 300s."}
+        return TrainResponse(success=False, message="Training timed out after 120s.")
 
     if result.returncode != 0:
-        return {
-            "status": "error",
-            "message": "train_model.py failed.",
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-        }
+        logger.error("train_model.py failed: %s", result.stderr)
+        return TrainResponse(success=False, message=f"Training failed: {result.stderr[-500:]}")
 
-    # Force reload
-    _custom_toxic_model = None
-    model = _load_custom_toxic_model()
-    _using_fallback_toxicity = model is None
+    try:
+        toxic_model = joblib.load(TOXIC_MODEL_PATH)
+    except Exception as exc:  # noqa: BLE001
+        return TrainResponse(success=False, message=f"Trained but failed to reload model: {exc}")
 
-    return {
-        "status": "success",
-        "message": "Custom toxicity classifier retrained and reloaded.",
-        "log": result.stdout.strip().splitlines()[-6:],  # last few lines of training log
-    }
+    accuracy = None
+    n_samples = None
+    for line in result.stdout.splitlines():
+        if "Holdout accuracy" in line:
+            try:
+                accuracy = float(line.strip().split(":")[-1])
+            except ValueError:
+                pass
+        if "Trained on" in line:
+            try:
+                n_samples = int(line.split("Trained on")[1].strip().split(" ")[0])
+            except (ValueError, IndexError):
+                pass
+
+    return TrainResponse(
+        success=True,
+        message="Custom classifier retrained and hot-reloaded successfully.",
+        n_samples=n_samples,
+        holdout_accuracy=accuracy,
+    )
 
 
 @app.post("/calculate-mood-impact", response_model=MoodImpactResponse)
 def calculate_mood_impact(payload: MoodImpactRequest):
-    n_toxic = payload.toxic_blocked_count
-    n_nsfw = payload.nsfw_blocked_count
-    n_trigger = payload.trigger_blocked_count
-    minutes = max(0.0, payload.session_duration_minutes)
+    """
+    Deterministic, explainable formula (no ML model needed) converting raw
+    blocked-content counts + session length into a "Mood Preservation Score".
 
-    s_raw = (n_toxic * 2.0) + (n_nsfw * 2.5) + (n_trigger * 1.5)
-    density = s_raw / max(1.0, minutes)
-    mood_score = max(0.0, min(100.0, 100 - (density * 15) + (s_raw * 2.5)))
+    S_raw   = (toxic * 2.0) + (nsfw * 2.5) + (trigger * 1.5)
+    D       = S_raw / max(1, minutes)
+    Score % = clamp(0, 100, 100 - (D * 15) + (S_raw * 2.5))
+    """
+    s_raw = (
+        (payload.toxic_blocked_count * 2.0)
+        + (payload.nsfw_blocked_count * 2.5)
+        + (payload.trigger_blocked_count * 1.5)
+    )
 
-    total_blocked = n_toxic + n_nsfw + n_trigger
-    if total_blocked == 0:
-        summary = (
-            f"No harmful content encountered in this {minutes:.0f}-minute session. "
-            "Your feed stayed clean."
-        )
-    else:
-        summary = (
-            f"Blocked {total_blocked} harmful item(s) "
-            f"({n_toxic} toxic, {n_nsfw} NSFW, {n_trigger} trigger matches) "
-            f"over {minutes:.0f} minutes. Estimated mental peace preserved: "
-            f"{mood_score:.0f}%."
-        )
+    minutes = max(1.0, payload.session_duration_minutes)
+    density = s_raw / minutes
+
+    raw_score = 100 - (density * 15) + (s_raw * 2.5)
+    mood_score = max(0.0, min(100.0, raw_score))
+
+    total_blocked = (
+        payload.toxic_blocked_count
+        + payload.nsfw_blocked_count
+        + payload.trigger_blocked_count
+    )
+
+    summary = (
+        f"Blocked {total_blocked} harmful item(s) over "
+        f"{payload.session_duration_minutes:.0f} min — "
+        f"{mood_score:.0f}% mental peace preserved."
+    )
 
     return MoodImpactResponse(
         stress_saved_units=round(s_raw, 2),
