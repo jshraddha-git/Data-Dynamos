@@ -172,3 +172,33 @@
 .wb-draft-alert-dismiss-btn:hover {
   opacity: 0.8;
 }
+/* --- Ambient Tone Neutralization Card --- */
+.wb-neutral-card {
+  background: linear-gradient(180deg, #14172a, #0d0f18);
+  border: 1px solid rgba(0, 246, 255, 0.35); /* Neon cyan accent */
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin: 10px 0;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color: var(--wb-text);
+  box-shadow: 0 0 18px rgba(0, 246, 255, 0.12);
+  animation: wb-fade-in 0.25s ease;
+}
+
+.wb-neutral-header {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--wb-cyan); /* Neon cyan heading */
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wb-neutral-text {
+  font-size: 13px;
+  color: var(--wb-muted);
+  line-height: 1.4;
+  margin: 0;
+  font-style: italic;
+}

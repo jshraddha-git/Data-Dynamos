@@ -162,6 +162,8 @@
 
       if (result.action === "blur") {
         applyBlurOverlay(block, result);
+      } else if (result.action === "neutralize" && result.ambient_summary) {
+        applyAmbientNeutralization(block, result);
       }
     } catch (err) {
       // Backend unreachable (e.g. not running) — fail open, don't block content.
@@ -219,6 +221,37 @@
       toggleBtn.textContent = isBlurred ? "Unhide Content" : "Hide Content";
       overlay.classList.toggle("wb-overlay-hidden", !isBlurred);
     });
+
+    // ---------------------------------------------------------------------
+  // Ambient Neutralization (Curing Phantom Anxiety) 🎨
+  // ---------------------------------------------------------------------
+  function applyAmbientNeutralization(block, result) {
+    const card = document.createElement("div");
+    card.className = "wb-neutral-card";
+
+    const header = document.createElement("div");
+    header.className = "wb-neutral-header";
+    header.textContent = "🕊️ Tone Neutralized";
+
+    const textEl = document.createElement("p");
+    textEl.className = "wb-neutral-text";
+    textEl.textContent = result.ambient_summary;
+
+    const reasonEl = document.createElement("div");
+    reasonEl.className = "wb-reason";
+    reasonEl.textContent = result.reason;
+
+    card.appendChild(header);
+    card.appendChild(textEl);
+    card.appendChild(reasonEl);
+
+    // Replace hostile post content with the calm, rephrased summary
+    block.innerHTML = "";
+    block.appendChild(card);
+
+    // Track trigger count for session stats
+    if (result.trigger_matched) incrementBlockedCounter("trigger");
+  }
 
     overlay.appendChild(badge);
     overlay.appendChild(reasonEl);
