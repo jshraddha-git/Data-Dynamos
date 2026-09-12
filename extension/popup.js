@@ -1,14 +1,10 @@
 /**
  * popup.js
  * ---------
- * Wires up the popup dashboard:
- *   - Sensitivity slider, master/NSFW/draft-check toggles -> chrome.storage.local
- *   - Trigger-topic tag input -> chrome.storage.local (read by content.js)
- *   - Mood & Wellbeing dashboard -> reads session stats from chrome.storage.local
- *     (written by content.js) and calls the backend's /calculate-mood-impact
+ * Wires up the extension popup settings, live mood score, and server connection.
  */
 
-const API_BASE = "http://localhost:8000";
+const DEFAULT_API_BASE = "http://localhost:8000";
 
 const el = {
   statusDot: document.getElementById("statusDot"),
@@ -18,6 +14,8 @@ const el = {
   enabledToggle: document.getElementById("enabledToggle"),
   nsfwToggle: document.getElementById("nsfwToggle"),
   draftToggle: document.getElementById("draftToggle"),
+  adaptiveToggle: document.getElementById("adaptiveToggle"),
+  adaptiveStatus: document.getElementById("adaptiveStatus"),
   triggerTags: document.getElementById("triggerTags"),
   triggerInput: document.getElementById("triggerInput"),
   statTime: document.getElementById("statTime"),
@@ -25,18 +23,27 @@ const el = {
   moodScoreValue: document.getElementById("moodScoreValue"),
   moodSummary: document.getElementById("moodSummary"),
   refreshMoodBtn: document.getElementById("refreshMoodBtn"),
+  serverSettingsToggle: document.getElementById("serverSettingsToggle"),
+  serverSettingsBody: document.getElementById("serverSettingsBody"),
+  apiBaseInput: document.getElementById("apiBaseInput"),
+  apiKeyInput: document.getElementById("apiKeyInput"),
+  saveServerBtn: document.getElementById("saveServerBtn"),
 };
 
 const DEFAULTS = {
   toxicityThreshold: 0.5,
-  userTriggers: [],
+  userTriggers: ["spoilers", "layoffs"],
   nsfwFilteringEnabled: true,
   draftCheckEnabled: true,
   extensionEnabled: true,
+  adaptiveSensitivityEnabled: true,
+  learnedSensitivityAdjustment: 0.0,
+  apiBaseUrl: DEFAULT_API_BASE,
+  apiKey: "",
 };
 
 // ---------------------------------------------------------------------
-// Settings: load + persist
+// Load & Render Settings
 // ---------------------------------------------------------------------
 function loadSettings() {
   chrome.storage.local.get(Object.keys(DEFAULTS), (stored) => {
@@ -47,8 +54,20 @@ function loadSettings() {
     el.enabledToggle.checked = settings.extensionEnabled;
     el.nsfwToggle.checked = settings.nsfwFilteringEnabled;
     el.draftToggle.checked = settings.draftCheckEnabled;
+    el.adaptiveToggle.checked = settings.adaptiveSensitivityEnabled;
+
+    // Display adaptive adjustment status
+    const adj = settings.learnedSensitivityAdjustment || 0.0;
+    const sign = adj >= 0 ? "+" : "";
+    el.adaptiveStatus.textContent = settings.adaptiveSensitivityEnabled
+      ? `Shift: ${sign}${adj.toFixed(2)}`
+      : "Disabled";
+
+    el.apiBaseInput.value = settings.apiBaseUrl;
+    el.apiKeyInput.value = settings.apiKey;
 
     renderTags(settings.userTriggers);
+    checkBackendHealth(settings.apiBaseUrl, settings.apiKey);
   });
 }
 
@@ -78,6 +97,9 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// ---------------------------------------------------------------------
+// Event Listeners
+// ---------------------------------------------------------------------
 el.thresholdSlider.addEventListener("input", () => {
   const value = parseFloat(el.thresholdSlider.value);
   el.thresholdValue.textContent = value.toFixed(2);
@@ -94,6 +116,11 @@ el.nsfwToggle.addEventListener("change", () => {
 
 el.draftToggle.addEventListener("change", () => {
   chrome.storage.local.set({ draftCheckEnabled: el.draftToggle.checked });
+});
+
+el.adaptiveToggle.addEventListener("change", () => {
+  chrome.storage.local.set({ adaptiveSensitivityEnabled: el.adaptiveToggle.checked });
+  el.adaptiveStatus.textContent = el.adaptiveToggle.checked ? "Active" : "Disabled";
 });
 
 el.triggerInput.addEventListener("keydown", (e) => {
@@ -113,32 +140,52 @@ el.triggerInput.addEventListener("keydown", (e) => {
   });
 });
 
+// Collapsible Server Settings
+el.serverSettingsToggle.addEventListener("click", () => {
+  const isHidden = el.serverSettingsBody.style.display === "none";
+  el.serverSettingsBody.style.display = isHidden ? "block" : "none";
+  el.serverSettingsToggle.textContent = isHidden ? "⚙ Server Connection ▴" : "⚙ Server Connection ▾";
+});
+
+el.saveServerBtn.addEventListener("click", () => {
+  const apiBaseUrl = el.apiBaseInput.value.trim().replace(/\/+$/, "") || DEFAULT_API_BASE;
+  const apiKey = el.apiKeyInput.value.trim();
+  chrome.storage.local.set({ apiBaseUrl, apiKey }, () => {
+    checkBackendHealth(apiBaseUrl, apiKey);
+    refreshMoodDashboard();
+  });
+});
+
 // ---------------------------------------------------------------------
-// Backend health check
+// Health Check
 // ---------------------------------------------------------------------
-async function checkBackendHealth() {
+async function checkBackendHealth(apiBase = DEFAULT_API_BASE, apiKey = "") {
   try {
-    const res = await fetch(`${API_BASE}/health`, { method: "GET" });
+    const headers = {};
+    if (apiKey) headers["X-API-Key"] = apiKey;
+
+    const res = await fetch(`${apiBase}/health`, { method: "GET", headers });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     el.statusDot.className = "status-dot online";
-    el.statusText.textContent = data.using_fallback_toxicity
-      ? "Online (Detoxify fallback model)"
-      : "Online (self-trained model active)";
+    const models = [];
+    if (data.primary_toxicity_model_loaded) models.push("Toxicity");
+    if (data.self_trained_lsa_model_loaded) models.push("LSA");
+    el.statusText.textContent = `Online (${models.join("+")} Self-Trained)`;
   } catch (err) {
     el.statusDot.className = "status-dot offline";
-    el.statusText.textContent = "Backend offline — start main.py on :8000";
+    el.statusText.textContent = "Backend offline — check server URL";
   }
 }
 
 // ---------------------------------------------------------------------
-// Mood & Wellbeing dashboard
+// Mood Dashboard
 // ---------------------------------------------------------------------
 function getSessionStats() {
   return new Promise((resolve) => {
     chrome.storage.local.get(["sessionStats", "sessionStartTimestamp"], (data) => {
       resolve({
-        stats: data.sessionStats || { toxicBlocked: 0, nsfwBlocked: 0, triggerBlocked: 0 },
+        stats: data.sessionStats || { toxicBlocked: 0, nsfwBlocked: 0, triggerBlocked: 0, memeBlocked: 0 },
         startedAt: data.sessionStartTimestamp || Date.now(),
       });
     });
@@ -148,37 +195,46 @@ function getSessionStats() {
 async function refreshMoodDashboard() {
   const { stats, startedAt } = await getSessionStats();
   const minutes = Math.max(0, (Date.now() - startedAt) / 60000);
-  const totalBlocked = stats.toxicBlocked + stats.nsfwBlocked + stats.triggerBlocked;
+  const totalBlocked =
+    (stats.toxicBlocked || 0) +
+    (stats.nsfwBlocked || 0) +
+    (stats.triggerBlocked || 0) +
+    (stats.memeBlocked || 0);
 
   el.statTime.textContent = `${minutes.toFixed(0)}m`;
   el.statBlocked.textContent = totalBlocked;
 
-  try {
-    const res = await fetch(`${API_BASE}/calculate-mood-impact`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        session_duration_minutes: minutes,
-        toxic_blocked_count: stats.toxicBlocked,
-        nsfw_blocked_count: stats.nsfwBlocked,
-        trigger_blocked_count: stats.triggerBlocked,
-      }),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    el.moodScoreValue.textContent = `${data.mood_preservation_score.toFixed(0)}%`;
-    el.moodSummary.textContent = data.summary;
-  } catch (err) {
-    el.moodScoreValue.textContent = "—";
-    el.moodSummary.textContent = "Couldn't reach the backend for a mood score.";
-  }
+  chrome.storage.local.get(["apiBaseUrl", "apiKey"], async (cfg) => {
+    const apiBase = (cfg.apiBaseUrl || DEFAULT_API_BASE).replace(/\/+$/, "");
+    const headers = { "Content-Type": "application/json" };
+    if (cfg.apiKey) headers["X-API-Key"] = cfg.apiKey;
+
+    try {
+      const res = await fetch(`${apiBase}/calculate-mood-impact`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          session_duration_minutes: minutes,
+          toxic_blocked_count: stats.toxicBlocked || 0,
+          nsfw_blocked_count: stats.nsfwBlocked || 0,
+          trigger_blocked_count: (stats.triggerBlocked || 0) + (stats.memeBlocked || 0),
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      el.moodScoreValue.textContent = `${data.mood_preservation_score.toFixed(0)}%`;
+      el.moodSummary.textContent = data.summary;
+    } catch (err) {
+      el.moodScoreValue.textContent = "—";
+      el.moodSummary.textContent = "Could not reach backend for mood score.";
+    }
+  });
 }
 
 el.refreshMoodBtn.addEventListener("click", refreshMoodDashboard);
 
 // ---------------------------------------------------------------------
-// Init
+// Boot
 // ---------------------------------------------------------------------
 loadSettings();
-checkBackendHealth();
 refreshMoodDashboard();

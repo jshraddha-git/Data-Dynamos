@@ -1,26 +1,24 @@
 /**
  * content.js
  * -----------
- * Runs on every page (see manifest.json host_permissions).
+ * Production content script for AI Wellbeing Buffer.
  *
- * Responsibilities:
- *   1. Scan the feed for post-like nodes as they're added (MutationObserver
- *      handles infinite-scroll feeds), extract text + image URLs, and send
- *      them to the backend BEFORE they're visually settled on screen.
- *   2. Apply a CSS blur + liftable overlay badge to anything flagged.
- *   3. Watch comment/post compose boxes and run a debounced pre-post
- *      toxicity check, injecting an inline rephrase suggestion.
- *   4. Track session stats (posts blocked, by category) for the mood
- *      dashboard in popup.js, persisted to chrome.storage.local.
+ * Core Capabilities:
+ *   1. Dynamically detects the host platform via WellbeingAdapterRegistry and
+ *      applies platform-tailored selectors for Twitter/X, Reddit, Instagram,
+ *      Facebook, TikTok, LinkedIn, YouTube, or Generic fallback.
+ *   2. Extracts text, image URLs, and video canvas frame snapshots for multimodal
+ *      and NSFW inspection.
+ *   3. Implements Adaptive Personal Sensitivity: learns from the user's implicit
+ *      unhide / rehide feedback to dynamically calibrate filtering sensitivity.
+ *   4. Displays Explainability Attribution: surfaces top driving keywords from the
+ *      self-trained model directly in the liftable post overlay.
+ *   5. Monitors compose boxes with debounced draft checks and constructive rephrasing.
  */
 
 (() => {
-  // Backend calls now go through background.js (see analyzePost/checkDraft
-  // below) — content scripts injected into https:// pages get blocked by
-  // Chrome's Private Network Access policy when fetching localhost directly.
-
   // ---------------------------------------------------------------------
-  // Config loaded from chrome.storage.local (set via popup.js)
+  // Config & State
   // ---------------------------------------------------------------------
   const DEFAULT_SETTINGS = {
     toxicityThreshold: 0.5,
@@ -28,29 +26,23 @@
     nsfwFilteringEnabled: true,
     draftCheckEnabled: true,
     extensionEnabled: true,
+    adaptiveSensitivityEnabled: true,
+    learnedSensitivityAdjustment: 0.0,
   };
 
   let settings = { ...DEFAULT_SETTINGS };
+  let activeAdapter = null;
 
   function loadSettings() {
     return new Promise((resolve) => {
-      chrome.storage.local.get(
-        ["toxicityThreshold", "userTriggers", "nsfwFilteringEnabled", "draftCheckEnabled", "extensionEnabled"],
-        (stored) => {
-          settings = {
-            toxicityThreshold: stored.toxicityThreshold ?? DEFAULT_SETTINGS.toxicityThreshold,
-            userTriggers: stored.userTriggers ?? DEFAULT_SETTINGS.userTriggers,
-            nsfwFilteringEnabled: stored.nsfwFilteringEnabled ?? DEFAULT_SETTINGS.nsfwFilteringEnabled,
-            draftCheckEnabled: stored.draftCheckEnabled ?? DEFAULT_SETTINGS.draftCheckEnabled,
-            extensionEnabled: stored.extensionEnabled ?? DEFAULT_SETTINGS.extensionEnabled,
-          };
-          resolve(settings);
-        }
-      );
+      chrome.storage.local.get(Object.keys(DEFAULT_SETTINGS), (stored) => {
+        settings = { ...DEFAULT_SETTINGS, ...stored };
+        resolve(settings);
+      });
     });
   }
 
-  // Re-sync settings whenever the popup changes them
+  // Re-sync settings whenever popup updates them
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
     for (const [key, { newValue }] of Object.entries(changes)) {
@@ -59,10 +51,10 @@
   });
 
   // ---------------------------------------------------------------------
-  // Session stats (for the Mood & Wellbeing dashboard)
+  // Session Stats
   // ---------------------------------------------------------------------
   const sessionStart = Date.now();
-  let sessionStats = { toxicBlocked: 0, nsfwBlocked: 0, triggerBlocked: 0 };
+  let sessionStats = { toxicBlocked: 0, nsfwBlocked: 0, triggerBlocked: 0, memeBlocked: 0 };
 
   function persistSessionStats() {
     chrome.storage.local.set({
@@ -72,23 +64,58 @@
   }
 
   // ---------------------------------------------------------------------
-  // Backend calls
+  // Adaptive Personal Sensitivity Engine (USP 2)
   // ---------------------------------------------------------------------
-  async function analyzePost(text, imageUrls) {
+  function getEffectiveThreshold() {
+    if (!settings.adaptiveSensitivityEnabled) {
+      return settings.toxicityThreshold;
+    }
+    const adjusted = settings.toxicityThreshold + (settings.learnedSensitivityAdjustment || 0.0);
+    // Clamp to valid range [0.15, 0.95]
+    return Math.max(0.15, Math.min(0.95, adjusted));
+  }
+
+  function recordUserFeedback(score, action) {
+    if (!settings.adaptiveSensitivityEnabled) return;
+    chrome.storage.local.get(["learnedSensitivityAdjustment", "unhideCount"], (data) => {
+      let adj = data.learnedSensitivityAdjustment || 0.0;
+      let count = (data.unhideCount || 0) + 1;
+
+      // If user unhides borderline content (0.45 - 0.75), increase tolerance
+      if (action === "unhide") {
+        if (score >= 0.40 && score <= 0.80) {
+          adj = Math.min(0.20, adj + 0.02);
+        }
+      } else if (action === "rehide") {
+        // User confirmed post was indeed unwanted, decrease tolerance
+        adj = Math.max(-0.20, adj - 0.03);
+      }
+
+      chrome.storage.local.set({
+        learnedSensitivityAdjustment: parseFloat(adj.toFixed(3)),
+        unhideCount: count,
+      });
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Backend Communication
+  // ---------------------------------------------------------------------
+  async function analyzePost(text, mediaUrls) {
     try {
       const response = await chrome.runtime.sendMessage({
         type: "wb-analyze-post",
         payload: {
           text: text || "",
-          image_urls: settings.nsfwFilteringEnabled ? imageUrls : [],
+          image_urls: settings.nsfwFilteringEnabled ? mediaUrls : [],
           user_triggers: settings.userTriggers,
-          toxicity_threshold: settings.toxicityThreshold,
+          toxicity_threshold: getEffectiveThreshold(),
         },
       });
       if (!response || !response.ok) throw new Error(response ? response.error : "no response");
       return response.data;
     } catch (err) {
-      console.warn("[Wellbeing Buffer] analyze-post failed (is the backend running on :8000?)", err);
+      console.warn("[Wellbeing Buffer] analyze-post failed:", err);
       return null;
     }
   }
@@ -102,70 +129,79 @@
       if (!response || !response.ok) throw new Error(response ? response.error : "no response");
       return response.data;
     } catch (err) {
-      console.warn("[Wellbeing Buffer] check-draft failed", err);
+      console.warn("[Wellbeing Buffer] check-draft failed:", err);
       return null;
     }
   }
 
   // ---------------------------------------------------------------------
-  // DOM: identifying "post-like" nodes generically across platforms
+  // DOM Overlay & Explainability Rendering (USP 1)
   // ---------------------------------------------------------------------
-  // Heuristic selector list — broad enough to work across Twitter/X, Reddit,
-  // and generic article/comment containers without a platform-specific
-  // scraper for every site.
-  const POST_SELECTORS = [
-    "article",
-    "[data-testid='tweet']",
-    "[data-testid='cellInnerDiv']",
-    "shreddit-comment",
-    "shreddit-post",
-    ".Comment",
-    "[role='article']",
-  ];
-
-  const processedNodes = new WeakSet();
-
-  function extractTextAndImages(node) {
-    const text = (node.innerText || "").trim().slice(0, 2000);
-    const images = Array.from(node.querySelectorAll("img"))
-      .map((img) => img.src)
-      .filter((src) => src && src.startsWith("http"))
-      .slice(0, 5); // cap per-post to keep requests light
-    return { text, images };
-  }
-
-  function buildOverlay(reason, badgeClass) {
-    const overlay = document.createElement("div");
-    overlay.className = "wb-overlay";
-
-    const badge = document.createElement("span");
-    badge.className = `wb-badge ${badgeClass}`;
-    badge.textContent = reason;
-
-    const button = document.createElement("button");
-    button.className = "wb-unhide-btn";
-    button.textContent = "Unhide Content";
-
-    overlay.appendChild(badge);
-    overlay.appendChild(button);
-    return { overlay, button };
-  }
-
   function badgeClassFor(result) {
+    if (result.cross_modal_flagged) return "wb-badge-meme";
     if (result.is_toxic) return "wb-badge-toxic";
     if (result.is_nsfw) return "wb-badge-nsfw";
     if (result.trigger_matched) return "wb-badge-trigger";
     return "wb-badge-toxic";
   }
 
+  function buildOverlay(result) {
+    const overlay = document.createElement("div");
+    overlay.className = "wb-overlay";
+
+    const badge = document.createElement("span");
+    badge.className = `wb-badge ${badgeClassFor(result)}`;
+    badge.textContent = result.reason;
+    overlay.appendChild(badge);
+
+    // Explainability Attribution Chip (USP 1)
+    if (result.explanation && result.explanation.length > 0) {
+      const expContainer = document.createElement("div");
+      expContainer.className = "wb-explain-box";
+
+      const expToggle = document.createElement("button");
+      expToggle.type = "button";
+      expToggle.className = "wb-explain-toggle";
+      expToggle.textContent = "ℹ Why was this flagged?";
+
+      const expContent = document.createElement("div");
+      expContent.className = "wb-explain-content";
+      expContent.style.display = "none";
+
+      const termsList = result.explanation
+        .map((e) => `<span class="wb-term-tag">"${e.term}" (+${e.contribution})</span>`)
+        .join(" ");
+      expContent.innerHTML = `<div class="wb-explain-desc">Model attribution signals:</div>${termsList}`;
+
+      expToggle.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const isShown = expContent.style.display === "block";
+        expContent.style.display = isShown ? "none" : "block";
+        expToggle.textContent = isShown ? "ℹ Why was this flagged?" : "▲ Hide explanation";
+      });
+
+      expContainer.appendChild(expToggle);
+      expContainer.appendChild(expContent);
+      overlay.appendChild(expContainer);
+    }
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "wb-unhide-btn";
+    button.textContent = "Unhide Content";
+    overlay.appendChild(button);
+
+    return { overlay, button };
+  }
+
   function applyBlur(node, result) {
-    // Wrap so the overlay can be absolutely positioned relative to the post
     if (getComputedStyle(node).position === "static") {
       node.style.position = "relative";
     }
     node.classList.add("wb-wrapper", "wb-blurred");
 
-    const { overlay, button } = buildOverlay(result.reason, badgeClassFor(result));
+    const { overlay, button } = buildOverlay(result);
     node.appendChild(overlay);
 
     let revealed = false;
@@ -176,62 +212,82 @@
       node.classList.toggle("wb-revealed", revealed);
       overlay.classList.toggle("wb-hidden", revealed);
       button.textContent = revealed ? "Hide Again" : "Unhide Content";
+
+      // Trigger personal adaptation update
+      recordUserFeedback(result.toxicity_score, revealed ? "unhide" : "rehide");
     });
 
-    // Update session stats once per node
+    // Update session metrics
+    if (result.cross_modal_flagged) sessionStats.memeBlocked += 1;
     if (result.is_toxic) sessionStats.toxicBlocked += 1;
     if (result.is_nsfw) sessionStats.nsfwBlocked += 1;
     if (result.trigger_matched) sessionStats.triggerBlocked += 1;
     persistSessionStats();
   }
 
+  // ---------------------------------------------------------------------
+  // Feed Scanning via Platform Adapters
+  // ---------------------------------------------------------------------
+  const processedNodes = new WeakSet();
+
   async function processNode(node) {
     if (!settings.extensionEnabled) return;
     if (processedNodes.has(node)) return;
     processedNodes.add(node);
 
-    const { text, images } = extractTextAndImages(node);
-    if (!text && images.length === 0) return;
+    if (!activeAdapter) {
+      activeAdapter = window.WellbeingAdapterRegistry.getActiveAdapter();
+    }
 
-    const result = await analyzePost(text, images);
+    const postData = activeAdapter.extractPostData(node);
+    if (!postData.text && postData.media.length === 0) return;
+
+    const result = await analyzePost(postData.text, postData.media);
     if (result && result.action === "blur") {
       applyBlur(node, result);
     }
   }
 
   function scanForPosts(root = document) {
-    const nodes = new Set();
-    for (const selector of POST_SELECTORS) {
-      root.querySelectorAll(selector).forEach((n) => nodes.add(n));
+    if (!activeAdapter) {
+      activeAdapter = window.WellbeingAdapterRegistry.getActiveAdapter();
     }
-    nodes.forEach((node) => processNode(node));
+    const selector = activeAdapter.getPostSelector();
+    try {
+      const nodes = root.querySelectorAll(selector);
+      nodes.forEach((node) => processNode(node));
+    } catch (err) {
+      console.warn("[Wellbeing Buffer] Selector query error:", err);
+    }
   }
 
   // ---------------------------------------------------------------------
-  // MutationObserver — handles infinite-scroll feeds
+  // MutationObserver for Infinite-Scroll Feeds
   // ---------------------------------------------------------------------
-  const observer = new MutationObserver((mutations) => {
+  const feedObserver = new MutationObserver((mutations) => {
+    if (!activeAdapter) {
+      activeAdapter = window.WellbeingAdapterRegistry.getActiveAdapter();
+    }
+    const selector = activeAdapter.getPostSelector();
+
     for (const mutation of mutations) {
-      mutation.addedNodes.forEach((added) => {
-        if (added.nodeType !== Node.ELEMENT_NODE) return;
+      for (const added of mutation.addedNodes) {
+        if (added.nodeType !== Node.ELEMENT_NODE) continue;
         scanForPosts(added.parentNode ? added : document);
-        // Also check the added node itself against selectors directly
-        for (const selector of POST_SELECTORS) {
-          if (added.matches && added.matches(selector)) {
-            processNode(added);
-          }
+        if (added.matches && added.matches(selector)) {
+          processNode(added);
         }
-      });
+      }
     }
   });
 
-  function startObserving() {
-    observer.observe(document.body, { childList: true, subtree: true });
-    scanForPosts(); // initial pass for content already on the page
+  function startFeedObserving() {
+    feedObserver.observe(document.body, { childList: true, subtree: true });
+    scanForPosts();
   }
 
   // ---------------------------------------------------------------------
-  // Pre-post compose check (debounced)
+  // Pre-Post Compose Watcher
   // ---------------------------------------------------------------------
   function debounce(fn, delay) {
     let timer = null;
@@ -250,7 +306,6 @@
     box.style.display = "none";
     inputEl._wbWarningBox = box;
 
-    // Insert right after the input element (or its closest block parent)
     const parent = inputEl.parentElement || document.body;
     parent.insertBefore(box, inputEl.nextSibling);
     return box;
@@ -270,40 +325,29 @@
 
   const debouncedDraftCheck = debounce(async (inputEl) => {
     if (!settings.draftCheckEnabled) return;
-    const text = inputEl.value !== undefined ? inputEl.value : inputEl.innerText;
+    const text = activeAdapter.getDraftText(inputEl);
     if (!text || text.trim().length < 4) {
       renderDraftWarning(inputEl, null);
       return;
     }
     const result = await checkDraft(text);
     renderDraftWarning(inputEl, result);
-  }, 600);
+  }, 500);
 
   function attachComposeListeners(root = document) {
-    const composeSelectors = [
-      "textarea",
-      "[contenteditable='true']",
-      "input[type='text']",
-      "div[role='textbox']",
-    ];
-    composeSelectors.forEach((selector) => {
-      root.querySelectorAll(selector).forEach((el) => {
-        if (el._wbListenerAttached) return;
-        el._wbListenerAttached = true;
-        el.addEventListener("input", () => debouncedDraftCheck(el));
-      });
+    if (!activeAdapter) {
+      activeAdapter = window.WellbeingAdapterRegistry.getActiveAdapter();
+    }
+    const composeSelector = activeAdapter.getComposeSelector();
+    root.querySelectorAll(composeSelector).forEach((el) => {
+      if (el._wbListenerAttached) return;
+      el._wbListenerAttached = true;
+      el.addEventListener("input", () => debouncedDraftCheck(el));
     });
   }
 
-  const composeObserver = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      if (mutation.addedNodes.length > 0) {
-        // Re-scan the whole document for new compose boxes; cheap because
-        // attachComposeListeners skips elements it has already wired up.
-        attachComposeListeners(document);
-        break;
-      }
-    }
+  const composeObserver = new MutationObserver(() => {
+    attachComposeListeners(document);
   });
 
   function startComposeWatching() {
@@ -312,17 +356,20 @@
   }
 
   // ---------------------------------------------------------------------
-  // Boot
+  // Initialization
   // ---------------------------------------------------------------------
   (async function init() {
     await loadSettings();
+    activeAdapter = window.WellbeingAdapterRegistry.getActiveAdapter();
+    console.log(`[AI Wellbeing Buffer] Initialized on ${window.location.hostname} using ${activeAdapter.name} adapter`);
+
     if (!document.body) {
       window.addEventListener("DOMContentLoaded", () => {
-        startObserving();
+        startFeedObserving();
         startComposeWatching();
       });
     } else {
-      startObserving();
+      startFeedObserving();
       startComposeWatching();
     }
   })();
