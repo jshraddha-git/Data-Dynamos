@@ -1,0 +1,13 @@
+{
+  "client_id": "test_user",
+  "weights": {
+    "this": -0.052,
+    "post": -0.052,
+    "test": -0.052
+  },
+  "unhide_count": 1,
+  "rehide_count": 0,
+  "total_feedback": 1,
+  "learned_bias": -0.026000000000000002,
+  "last_updated": 1789260838.2023628
+}

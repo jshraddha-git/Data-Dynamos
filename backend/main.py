@@ -46,6 +46,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
+from multimodal_scorer import compute_cross_modal_disparity
+from personalization_engine import personalization_engine
+from dual_vector_fusion import dual_vector_fusion
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.environ.get("MODEL_PATH", os.path.join(BASE_DIR, "custom_toxic_model.joblib"))
 LSA_MODEL_PATH = os.environ.get("LSA_MODEL_PATH", os.path.join(BASE_DIR, "custom_semantic_lsa.joblib"))
@@ -57,7 +61,7 @@ API_KEY = os.environ.get("API_KEY", "").strip()
 # In-Memory Sliding-Window Rate Limiter
 # ---------------------------------------------------------------------------
 RATE_LIMIT_WINDOW_SECONDS = 60
-RATE_LIMIT_MAX_REQUESTS = 120 # requests per window
+RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("RATE_LIMIT_MAX_REQUESTS", "2000")) # requests per window
 _request_records = defaultdict(list)
 
 def enforce_rate_limit(client_id: str):
@@ -241,7 +245,7 @@ def explain_toxicity(text: str, top_k: int = 4) -> List[Dict[str, Any]]:
         return []
 
     try:
-        features_step = model.named_steps.get("features")
+        features_step = model.named_steps.get("features") or model.named_steps.get("tfidf")
         clf_step = model.named_steps.get("clf")
         if not features_step or not clf_step:
             return []
@@ -277,25 +281,37 @@ def explain_toxicity(text: str, top_k: int = 4) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Core Scoring Functions
 # ---------------------------------------------------------------------------
-def score_toxicity(text: str) -> float:
+def score_toxicity(text: str, apply_dual_vector: bool = True) -> Tuple[float, Dict[str, Any]]:
     text = (text or "").strip()
     if not text:
-        return 0.0
+        return 0.0, {}
 
     model = _load_custom_toxic_model()
+    base_score = 0.0
+    meta = {}
     if model is not None:
         try:
             proba = model.predict_proba([text])[0]
             classes = list(model.classes_)
             idx = classes.index(1) if 1 in classes else int(np.argmax(proba))
-            return float(proba[idx])
+            base_score = float(proba[idx])
+
+            if apply_dual_vector:
+                lsa = _load_custom_lsa_model()
+                f_step = model.named_steps.get("features") or model.named_steps.get("tfidf")
+                c_step = model.named_steps.get("clf")
+                decoupled_score, meta = dual_vector_fusion.decompose_and_score(
+                    text, base_score, lsa, f_step, c_step
+                )
+                return decoupled_score, meta
+            return base_score, {}
         except Exception as exc:
             print(f"[main.py] Primary model inference error: {exc}")
 
     # Fallback heuristic
     crude_flags = ["idiot", "stupid", "moron", "loser", "kill yourself", "pathetic", "worthless", "filth"]
     hits = sum(1 for w in crude_flags if w in text.lower())
-    return min(1.0, hits * 0.35)
+    return min(1.0, hits * 0.35), {}
 
 
 def is_text_nsfw(text: str, toxicity_score: float) -> bool:
@@ -478,6 +494,7 @@ class AnalyzePostRequest(BaseModel):
     image_urls: List[str] = Field(default_factory=list) # includes Base64 video canvas frames
     user_triggers: List[str] = Field(default_factory=list)
     toxicity_threshold: float = 0.5
+    client_id: str = "default"
 
 
 class ExplainTerm(BaseModel):
@@ -496,6 +513,16 @@ class AnalyzePostResponse(BaseModel):
     explanation: List[ExplainTerm] = Field(default_factory=list)
     cross_modal_disparity: float = 0.0
     cross_modal_flagged: bool = False
+    cross_modal_details: Dict[str, Any] = Field(default_factory=dict)
+    personal_shift: float = 0.0
+    dual_vector_meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PersonalizeFeedbackRequest(BaseModel):
+    text: str
+    action: str # "unhide" or "rehide"
+    base_score: float = 0.5
+    client_id: str = "default"
 
 
 class CheckDraftRequest(BaseModel):
@@ -539,7 +566,13 @@ def health():
 
 @app.post("/analyze-post", response_model=AnalyzePostResponse)
 def analyze_post(payload: AnalyzePostRequest, _auth: bool = Depends(verify_api_key)):
-    toxicity_score = score_toxicity(payload.text)
+    # 1. Dual-Vector Context Fusion (Topic vs Affect)
+    base_toxicity_score, dv_meta = score_toxicity(payload.text, apply_dual_vector=True)
+
+    # 2. Machine-Learned Adaptive Personalization via Vector Shifts
+    toxicity_score, personal_shift = personalization_engine.score_post(
+        payload.text, base_toxicity_score, payload.client_id
+    )
     is_toxic = toxicity_score >= payload.toxicity_threshold
 
     text_nsfw = is_text_nsfw(payload.text, toxicity_score)
@@ -550,9 +583,9 @@ def analyze_post(payload: AnalyzePostRequest, _auth: bool = Depends(verify_api_k
         payload.text, payload.user_triggers
     )
 
-    # Multimodal joint scoring (USP 3)
-    disparity_score, is_cross_modal = compute_multimodal_disparity(
-        payload.text, len(payload.image_urls), toxicity_score
+    # 3. Dual-Stream Multimodal Joint Disparity Scorer (Solving Malicious Subtlety)
+    disparity_score, is_cross_modal, cm_details = compute_cross_modal_disparity(
+        payload.text, payload.image_urls, toxicity_score
     )
 
     should_blur = is_toxic or is_nsfw or trigger_matched or is_cross_modal
@@ -567,7 +600,7 @@ def analyze_post(payload: AnalyzePostRequest, _auth: bool = Depends(verify_api_k
     if is_toxic and is_nsfw:
         reason = "Toxic and NSFW content detected"
     elif is_cross_modal:
-        reason = "Antagonistic Meme / Cross-Modal Disparity Detected"
+        reason = f"Antagonistic Meme / Disparity Detected ({disparity_score:.2f})"
     elif is_toxic:
         reason = "Toxic Content Blocked"
     elif is_nsfw:
@@ -588,12 +621,39 @@ def analyze_post(payload: AnalyzePostRequest, _auth: bool = Depends(verify_api_k
         explanation=explanation,
         cross_modal_disparity=disparity_score,
         cross_modal_flagged=is_cross_modal,
+        cross_modal_details=cm_details,
+        personal_shift=personal_shift,
+        dual_vector_meta=dv_meta,
     )
+
+
+@app.post("/personalize-feedback")
+def personalize_feedback(payload: PersonalizeFeedbackRequest, _auth: bool = Depends(verify_api_key)):
+    """Online SGD update for personal vector shift model."""
+    result = personalization_engine.record_feedback(
+        text=payload.text,
+        action=payload.action,
+        base_score=payload.base_score,
+        client_id=payload.client_id
+    )
+    return result
+
+
+@app.get("/personalize-stats/{client_id}")
+def personalize_stats(client_id: str = "default", _auth: bool = Depends(verify_api_key)):
+    """Returns the learned personalization metrics and top shifted terms for a client."""
+    return personalization_engine.get_user_stats(client_id)
+
+
+@app.post("/personalize-reset/{client_id}")
+def personalize_reset(client_id: str = "default", _auth: bool = Depends(verify_api_key)):
+    """Resets the learned personalization model and profile for a client."""
+    return personalization_engine.reset_user_profile(client_id)
 
 
 @app.post("/check-draft", response_model=CheckDraftResponse)
 def check_draft(payload: CheckDraftRequest, _auth: bool = Depends(verify_api_key)):
-    score = score_toxicity(payload.draft_text)
+    score, _ = score_toxicity(payload.draft_text, apply_dual_vector=False)
     is_risky = score >= 0.45
     suggestion = suggest_rephrase(payload.draft_text) if is_risky else None
     return CheckDraftResponse(

@@ -27,18 +27,25 @@ async function getBackendConfig() {
   });
 }
 
-async function forwardToBackend(path, body) {
+async function forwardToBackend(path, body = null, method = "POST") {
   const { apiBase, apiKey } = await getBackendConfig();
-  const headers = { "Content-Type": "application/json" };
+  const headers = {};
+  if (body) {
+    headers["Content-Type"] = "application/json";
+  }
   if (apiKey) {
     headers["X-API-Key"] = apiKey;
   }
 
-  const res = await fetch(`${apiBase}${path}`, {
-    method: "POST",
+  const reqOptions = {
+    method,
     headers,
-    body: JSON.stringify(body),
-  });
+  };
+  if (body && method !== "GET") {
+    reqOptions.body = JSON.stringify(body);
+  }
+
+  const res = await fetch(`${apiBase}${path}`, reqOptions);
 
   if (res.status === 429) {
     const retryAfter = res.headers.get("Retry-After") || "5";
@@ -88,21 +95,44 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || !message.type) return false;
 
   if (message.type === "wb-analyze-post") {
-    queueRequest(() => forwardToBackend("/analyze-post", message.payload))
+    queueRequest(() => forwardToBackend("/analyze-post", message.payload, "POST"))
       .then((data) => sendResponse({ ok: true, data }))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true; // Keep message channel open for async response
   }
 
   if (message.type === "wb-check-draft") {
-    queueRequest(() => forwardToBackend("/check-draft", message.payload))
+    queueRequest(() => forwardToBackend("/check-draft", message.payload, "POST"))
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+
+  if (message.type === "wb-personalize-feedback") {
+    queueRequest(() => forwardToBackend("/personalize-feedback", message.payload, "POST"))
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+
+  if (message.type === "wb-personalize-stats") {
+    const clientId = (message.payload && message.payload.clientId) || "default";
+    queueRequest(() => forwardToBackend(`/personalize-stats/${clientId}`, null, "GET"))
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+
+  if (message.type === "wb-personalize-reset") {
+    const clientId = (message.payload && message.payload.clientId) || "default";
+    queueRequest(() => forwardToBackend(`/personalize-reset/${clientId}`, null, "POST"))
       .then((data) => sendResponse({ ok: true, data }))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true;
   }
 
   if (message.type === "wb-calculate-mood") {
-    forwardToBackend("/calculate-mood-impact", message.payload)
+    forwardToBackend("/calculate-mood-impact", message.payload, "POST")
       .then((data) => sendResponse({ ok: true, data }))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true;

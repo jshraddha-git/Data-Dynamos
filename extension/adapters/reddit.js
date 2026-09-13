@@ -12,7 +12,7 @@ class RedditAdapter extends window.BasePlatformAdapter {
   }
 
   getPostSelector() {
-    return "shreddit-post, shreddit-comment, div[data-testid='post-container'], .Comment, .entry";
+    return "shreddit-post, div[data-testid='post-container'], shreddit-comment, .Comment, .entry";
   }
 
   getComposeSelector() {
@@ -20,10 +20,15 @@ class RedditAdapter extends window.BasePlatformAdapter {
   }
 
   extractText(node) {
-    // 1. Shreddit post title + body
-    const titleEl = node.querySelector("[slot='title'], h1, h2, a[data-testid='post-title']");
-    const bodyEl = node.querySelector("[slot='text-body'], div[data-testid='post-content'], .usertext-body");
-    const title = titleEl ? titleEl.innerText.trim() : "";
+    // 1. Check attribute directly on shreddit-post tag (present immediately upon DOM creation)
+    let title = (node.getAttribute && node.getAttribute("post-title")) || "";
+    if (!title) {
+      const titleEl = node.querySelector("[slot='title'], h1, h2, h3, a[data-testid='post-title'], a[slot='full-post-link']");
+      if (titleEl) title = titleEl.innerText.trim();
+    }
+
+    // 2. Body text from slots or text containers
+    const bodyEl = node.querySelector("[slot='text-body'], div[data-testid='post-content'], .usertext-body, [slot='comment'], div[id$='-post-rtjson-content'], [data-click-id='text']");
     const body = bodyEl ? bodyEl.innerText.trim() : "";
 
     if (title || body) {
@@ -34,13 +39,22 @@ class RedditAdapter extends window.BasePlatformAdapter {
 
   extractImages(node) {
     const images = [];
-    // Shreddit media lightbox or image gallery
-    const imgEls = node.querySelectorAll("img[src*='redd.it'], img[src*='redditmedia'], shreddit-player img");
+    // 1. Shreddit media lightbox, aspect-ratio containers, or image gallery
+    const imgEls = node.querySelectorAll("img[src*='redd.it'], img[src*='redditmedia'], img[src*='preview.redd.it'], shreddit-player img, shreddit-aspect-ratio img, img");
     imgEls.forEach((img) => {
-      const src = img.src || img.getAttribute("data-src");
-      if (src && src.startsWith("http")) images.push(src);
+      const src = img.src || img.getAttribute("data-src") || img.getAttribute("data-lazy-src");
+      if (src && src.startsWith("http") && !src.includes("/avatar") && !src.includes("/emoji") && !src.includes("styles/profile")) {
+        images.push(src);
+      }
     });
-    if (images.length > 0) return images.slice(0, 4);
+
+    // 2. Direct content-href attribute on shreddit-post if it points to an image
+    const contentHref = node.getAttribute ? node.getAttribute("content-href") : null;
+    if (contentHref && (contentHref.endsWith(".png") || contentHref.endsWith(".jpg") || contentHref.endsWith(".jpeg") || contentHref.includes("redd.it"))) {
+      images.push(contentHref);
+    }
+
+    if (images.length > 0) return [...new Set(images)].slice(0, 4);
     return super.extractImages(node);
   }
 }

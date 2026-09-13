@@ -93,7 +93,62 @@ def run_tests():
     print("[PASS] /train-custom-classifier:", retrain_data["status"], "| Message:", retrain_data["message"])
     assert retrain_data["status"] == "success", "Live retraining failed!"
 
-    # 8. Rate Limiter Test (Simulate rapid burst)
+    # 8. USP 1: Dual-Vector Context Fusion (Civil Discussion Damping)
+    res_civil = client.post("/analyze-post", json={
+        "text": "The committee held an intense legislative debate regarding political corruption allegations in the senate."
+    })
+    assert res_civil.status_code == 200
+    civil_data = res_civil.json()
+    print("[PASS] USP 1 Dual-Vector Fusion:", civil_data["action"], "| Meta:", civil_data["dual_vector_meta"])
+    assert civil_data["action"] == "show", "Civil political debate should not be blocked!"
+    assert civil_data["dual_vector_meta"]["false_alarm_damped"] is True, "False alarm damping should activate for civil discussion!"
+
+    # 9. USP 2: Online SGD Personalization Engine
+    client.post("/personalize-reset/test_client")
+    test_phrase = "You are a completely terrible and useless clown."
+    res_before = client.post("/analyze-post", json={"text": test_phrase, "client_id": "test_client"})
+    assert res_before.status_code == 200
+    before_data = res_before.json()
+    assert before_data["action"] == "blur"
+
+    # User unhides the content -> online SGD learns tolerance
+    res_fb = client.post("/personalize-feedback", json={
+        "text": test_phrase,
+        "action": "unhide",
+        "base_score": before_data["toxicity_score"],
+        "client_id": "test_client"
+    })
+    assert res_fb.status_code == 200
+    fb_data = res_fb.json()
+    assert fb_data["learned_bias"] < 0.0, "Learned bias should shift negatively on unhide!"
+
+    # Score post again: personalized shift lowers score
+    res_after = client.post("/analyze-post", json={"text": test_phrase, "client_id": "test_client"})
+    after_data = res_after.json()
+    print("[PASS] USP 2 Online Personalization:", after_data["action"], "| Shift:", after_data["personal_shift"], "| New Score:", after_data["toxicity_score"])
+    assert after_data["personal_shift"] < 0.0, "Personal vector shift should lower perceived hostility!"
+
+    # Reset profile
+    client.post("/personalize-reset/test_client")
+
+    # 10. USP 3: Dual-Stream Multimodal Joint Disparity Scorer (Toxic Memes)
+    import cv2, numpy as np, base64
+    img = np.zeros((64, 64, 3), dtype=np.uint8)
+    img[::4, ::4] = [255, 0, 0] # high spatial energy / edge noise
+    _, buf = cv2.imencode(".jpg", img)
+    b64_img = "data:image/jpeg;base64," + base64.b64encode(buf).decode("ascii")
+
+    res_meme = client.post("/analyze-post", json={
+        "text": "what a hero, wow so lovely and peaceful",
+        "image_urls": [b64_img]
+    })
+    assert res_meme.status_code == 200
+    meme_data = res_meme.json()
+    print("[PASS] USP 3 Multimodal Disparity:", meme_data["action"], "| Disparity:", meme_data["cross_modal_disparity"], "| Reason:", meme_data["reason"])
+    assert meme_data["cross_modal_flagged"] is True, "Subtle antagonistic meme should be flagged by multimodal disparity!"
+    assert meme_data["action"] == "blur", "Flagged meme should be blurred!"
+
+    # 11. Rate Limiter Test (Simulate rapid burst)
     rapid_client = TestClient(app)
     hit_rate_limit = False
     for i in range(135):
