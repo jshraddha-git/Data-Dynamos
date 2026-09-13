@@ -20,21 +20,22 @@ class RedditAdapter extends window.BasePlatformAdapter {
   }
 
   extractText(node) {
-    // 1. Check attribute directly on shreddit-post tag (present immediately upon DOM creation)
     let title = (node.getAttribute && node.getAttribute("post-title")) || "";
     if (!title) {
-      const titleEl = node.querySelector("[slot='title'], h1, h2, h3, a[data-testid='post-title'], a[slot='full-post-link']");
-      if (titleEl) title = titleEl.innerText.trim();
+      const titleEl = node.querySelector("[slot='title'], h1, h2, h3, a[data-testid='post-title'], a[slot='full-post-link'], p[data-testid='post-title']");
+      if (titleEl) title = (titleEl.innerText || titleEl.textContent || "").trim();
     }
 
-    // 2. Body text from slots or text containers
-    const bodyEl = node.querySelector("[slot='text-body'], div[data-testid='post-content'], .usertext-body, [slot='comment'], div[id$='-post-rtjson-content'], [data-click-id='text']");
-    const body = bodyEl ? bodyEl.innerText.trim() : "";
+    const bodyEl = node.querySelector("[slot='text-body'], [slot='comment'], div[data-testid='post-content'], .usertext-body, div[id$='-post-rtjson-content'], [data-click-id='text'], .md, p");
+    const body = bodyEl ? (bodyEl.innerText || bodyEl.textContent || "").trim() : "";
 
-    if (title || body) {
-      return `${title}\n${body}`.trim().slice(0, 2500);
+    let shadowText = "";
+    if (node.shadowRoot) {
+      shadowText = (node.shadowRoot.innerText || node.shadowRoot.textContent || "").trim();
     }
-    return (node.innerText || "").trim().slice(0, 2500);
+
+    const full = `${title} ${body} ${shadowText} ${node.innerText || node.textContent || ""}`.replace(/\s+/g, " ").trim();
+    return full.slice(0, 2500);
   }
 
   extractImages(node) {

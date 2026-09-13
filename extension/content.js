@@ -28,6 +28,7 @@
     extensionEnabled: true,
     adaptiveSensitivityEnabled: true,
     learnedSensitivityAdjustment: 0.0,
+    autoNeutralizeEnabled: false,
   };
 
   let settings = { ...DEFAULT_SETTINGS };
@@ -64,22 +65,27 @@
   }
 
   // ---------------------------------------------------------------------
-  // Adaptive Personal Sensitivity Engine (USP 2)
+  // Adaptive Personal Sensitivity & IndexedDB On-Device Shifts (USP 1)
   // ---------------------------------------------------------------------
   function getEffectiveThreshold() {
-    if (!settings.adaptiveSensitivityEnabled) {
-      return settings.toxicityThreshold;
-    }
-    const adjusted = settings.toxicityThreshold + (settings.learnedSensitivityAdjustment || 0.0);
-    // Clamp to valid range [0.15, 0.95]
-    return Math.max(0.15, Math.min(0.95, adjusted));
+    return settings.toxicityThreshold || 0.5;
   }
 
   function recordUserFeedback(score, action, postText = "") {
     if (!settings.adaptiveSensitivityEnabled) return;
 
-    // Dispatch feedback to backend online SGD personalization engine
     if (postText) {
+      // 1. On-Device Model Adaptation via IndexedDB
+      chrome.runtime.sendMessage({
+        type: "wb-db-record-shift",
+        payload: {
+          text: postText,
+          action: action,
+          baseScore: score || 0.5,
+        },
+      }).catch((err) => console.warn("[Wellbeing Buffer] IndexedDB record error:", err));
+
+      // 2. Dispatch feedback to backend online SGD engine
       chrome.runtime.sendMessage({
         type: "wb-personalize-feedback",
         payload: {
@@ -88,35 +94,44 @@
           base_score: score || 0.5,
           client_id: "default",
         },
-      }).catch((err) => console.warn("[Wellbeing Buffer] Personalize feedback failed:", err));
+      })
+        .then((res) => {
+          if (res && res.ok && res.data) {
+            const learnedBias = res.data.learned_bias || 0.0;
+            chrome.storage.local.set({
+              learnedSensitivityAdjustment: learnedBias,
+            });
+          }
+        })
+        .catch((err) => console.warn("[Wellbeing Buffer] Personalize feedback failed:", err));
     }
 
-    chrome.storage.local.get(["learnedSensitivityAdjustment", "unhideCount"], (data) => {
-      let adj = data.learnedSensitivityAdjustment || 0.0;
-      let count = (data.unhideCount || 0) + 1;
-
-      // If user unhides borderline content (0.40 - 0.80), increase tolerance
-      if (action === "unhide") {
-        if (score >= 0.40 && score <= 0.80) {
-          adj = Math.min(0.20, adj + 0.02);
-        }
-      } else if (action === "rehide") {
-        // User confirmed post was indeed unwanted, decrease tolerance
-        adj = Math.max(-0.20, adj - 0.03);
-      }
-
-      chrome.storage.local.set({
-        learnedSensitivityAdjustment: parseFloat(adj.toFixed(3)),
-        unhideCount: count,
-      });
+    chrome.storage.local.get(["unhideCount"], (data) => {
+      const count = (data.unhideCount || 0) + (action === "unhide" ? 1 : 0);
+      chrome.storage.local.set({ unhideCount: count });
     });
   }
 
   // ---------------------------------------------------------------------
-  // Backend Communication
+  // Backend Communication with On-Device Vector Shifts
   // ---------------------------------------------------------------------
   async function analyzePost(text, mediaUrls) {
     try {
+      // 1. Query on-device IndexedDB vector shift
+      let localShift = 0.0;
+      let localTerms = [];
+      try {
+        const dbRes = await chrome.runtime.sendMessage({
+          type: "wb-db-get-shift",
+          payload: { text: text || "" },
+        });
+        if (dbRes && dbRes.ok && dbRes.data) {
+          localShift = dbRes.data.shift || 0.0;
+          localTerms = dbRes.data.matchedTerms || [];
+        }
+      } catch (_) {}
+
+      // 2. Query backend ML inference
       const response = await chrome.runtime.sendMessage({
         type: "wb-analyze-post",
         payload: {
@@ -127,9 +142,21 @@
         },
       });
       if (!response || !response.ok) throw new Error(response ? response.error : "no response");
-      return response.data;
+
+      const data = response.data;
+      data.on_device_shift = localShift;
+      data.on_device_terms = localTerms;
+
+      // 3. Apply on-device IndexedDB vector shift if present (guardrailed for safety)
+      if (localShift !== 0.0 && data.toxicity_score < 0.65) {
+        data.toxicity_score = Math.max(0.0, Math.min(1.0, data.toxicity_score + localShift));
+        data.is_toxic = data.toxicity_score >= getEffectiveThreshold();
+        data.action = (data.is_toxic || data.is_nsfw || data.trigger_matched || data.cross_modal_flagged) ? "blur" : "show";
+      }
+
+      return data;
     } catch (err) {
-      console.warn("[Wellbeing Buffer] analyze-post failed:", err);
+      // Backend temporarily unreachable or rate limited; allow future scans to retry cleanly
       return null;
     }
   }
@@ -140,10 +167,10 @@
         type: "wb-check-draft",
         payload: { draft_text: draftText },
       });
-      if (!response || !response.ok) throw new Error(response ? response.error : "no response");
+      if (!response || !response.ok) return null;
       return response.data;
     } catch (err) {
-      console.warn("[Wellbeing Buffer] check-draft failed:", err);
+      // Fail silently without dumping warning to Chrome Extensions error tab
       return null;
     }
   }
@@ -159,7 +186,13 @@
     return "wb-badge-toxic";
   }
 
-  function buildOverlay(result) {
+  function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str || "";
+    return div.innerHTML;
+  }
+
+  function buildOverlay(result, postText = "") {
     const overlay = document.createElement("div");
     overlay.className = "wb-overlay";
 
@@ -168,45 +201,130 @@
     badge.textContent = result.reason;
     overlay.appendChild(badge);
 
-    // Explainability Attribution Chip (USP 1)
-    if (result.explanation && result.explanation.length > 0) {
-      const expContainer = document.createElement("div");
-      expContainer.className = "wb-explain-box";
-
-      const expToggle = document.createElement("button");
-      expToggle.type = "button";
-      expToggle.className = "wb-explain-toggle";
-      expToggle.textContent = "ℹ Why was this flagged?";
-
-      const expContent = document.createElement("div");
-      expContent.className = "wb-explain-content";
-      expContent.style.display = "none";
-
-      const termsList = result.explanation
-        .map((e) => `<span class="wb-term-tag">"${e.term}" (+${e.contribution})</span>`)
-        .join(" ");
-      expContent.innerHTML = `<div class="wb-explain-desc">Model attribution signals:</div>${termsList}`;
-
-      expToggle.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const isShown = expContent.style.display === "block";
-        expContent.style.display = isShown ? "none" : "block";
-        expToggle.textContent = isShown ? "ℹ Why was this flagged?" : "▲ Hide explanation";
-      });
-
-      expContainer.appendChild(expToggle);
-      expContainer.appendChild(expContent);
-      overlay.appendChild(expContainer);
+    // -------------------------------------------------------------------
+    // User Experience USP: Ambient Neutralization (Calm Read)
+    // -------------------------------------------------------------------
+    let neutralizedText = result.neutralized_text;
+    if (!neutralizedText && window.AmbientNeutralizerClient) {
+      neutralizedText = window.AmbientNeutralizerClient.neutralize(postText).neutralized;
+    }
+    if (!neutralizedText) {
+      neutralizedText = "[Calm Read: The author expresses strong personal disagreement with this viewpoint.]";
     }
 
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "wb-unhide-btn";
-    button.textContent = "Unhide Content";
-    overlay.appendChild(button);
+    const neutContainer = document.createElement("div");
+    neutContainer.className = "wb-neutralized-container";
+    neutContainer.style.display = "none";
+    neutContainer.innerHTML = `
+      <div class="wb-neutralized-header">🌿 Ambient Neutralized Summary (Calm Read)</div>
+      <div class="wb-neutralized-body">${escapeHtml(neutralizedText)}</div>
+    `;
+    overlay.appendChild(neutContainer);
 
-    return { overlay, button };
+    // -------------------------------------------------------------------
+    // Context Analysis & Explainability Radar (USP 1 & USP 3)
+    // -------------------------------------------------------------------
+    const expContainer = document.createElement("div");
+    expContainer.className = "wb-explain-box";
+
+    const expToggle = document.createElement("button");
+    expToggle.type = "button";
+    expToggle.className = "wb-explain-toggle";
+    expToggle.textContent = "ℹ Why was this flagged? (Model Radar)";
+
+    const expContent = document.createElement("div");
+    expContent.className = "wb-explain-content";
+    expContent.style.display = "none";
+
+    let detailsHtml = "";
+
+    // 1. Dual-Vector Subspace Projection
+    if (result.dual_vector_meta && result.dual_vector_meta.topic_intensity !== undefined) {
+      const meta = result.dual_vector_meta;
+      const topicPct = Math.round((meta.topic_intensity || 0) * 100);
+      const affectPct = Math.round((meta.affect_ratio || 0) * 100);
+      const slurEnergy = meta.direct_hostility_energy || 0.0;
+      detailsHtml += `
+        <div class="wb-radar-card">
+          <div class="wb-radar-title">📐 Dual-Vector Subspace Projection (Topic vs Affect)</div>
+          <div class="wb-radar-row">
+            <span>Topic Subspace Energy:</span>
+            <span class="wb-radar-val">${topicPct}%</span>
+          </div>
+          <div class="wb-radar-bar-wrap"><div class="wb-radar-bar" style="width: ${topicPct}%; background: var(--wb-neon-cyan);"></div></div>
+          <div class="wb-radar-row">
+            <span>Affect Hostility Ratio:</span>
+            <span class="wb-radar-val">${affectPct}%</span>
+          </div>
+          <div class="wb-radar-bar-wrap"><div class="wb-radar-bar" style="width: ${affectPct}%; background: var(--wb-neon-red);"></div></div>
+          <div class="wb-radar-note">Direct slur energy: <b>${slurEnergy}</b> ${meta.false_alarm_damped ? "• Topical debate protected" : ""}</div>
+        </div>
+      `;
+    }
+
+    // 2. Multimodal Joint Disparity (Malicious Subtlety)
+    if (result.cross_modal_flagged) {
+      detailsHtml += `
+        <div class="wb-radar-card" style="border-color: var(--wb-neon-pink);">
+          <div class="wb-radar-title" style="color: var(--wb-neon-pink);">⚡ Malicious Subtlety (Cross-Modal Disparity)</div>
+          <div class="wb-radar-row">
+            <span>Disparity Tension:</span>
+            <span class="wb-radar-val">${result.cross_modal_disparity}</span>
+          </div>
+          <div class="wb-radar-note">Innocuous textual surface clashing with antagonistic visual context.</div>
+        </div>
+      `;
+    }
+
+    // 3. Linear Feature Attribution Tokens
+    if (result.explanation && result.explanation.length > 0) {
+      const termsList = result.explanation
+        .map((e) => `<span class="wb-term-tag">"${escapeHtml(e.term)}" (+${e.contribution})</span>`)
+        .join(" ");
+      detailsHtml += `<div class="wb-explain-desc">Model linear attribution signals:</div>${termsList}`;
+    }
+
+    // 4. On-Device IndexedDB Shifts
+    if (result.on_device_terms && result.on_device_terms.length > 0) {
+      const dbTerms = result.on_device_terms
+        .map((t) => `<span class="wb-term-tag" style="border-color: var(--wb-neon-green); color: var(--wb-neon-green);">"${escapeHtml(t.term)}" (${t.weight > 0 ? "+" : ""}${t.weight})</span>`)
+        .join(" ");
+      detailsHtml += `<div class="wb-explain-desc" style="margin-top: 8px;">On-Device IndexedDB Shifts:</div>${dbTerms}`;
+    }
+
+    expContent.innerHTML = detailsHtml || `<div class="wb-explain-desc">Moderation score: ${result.toxicity_score}</div>`;
+
+    expToggle.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const isShown = expContent.style.display === "block";
+      expContent.style.display = isShown ? "none" : "block";
+      expToggle.textContent = isShown ? "ℹ Why was this flagged? (Model Radar)" : "▲ Hide explanation";
+    });
+
+    expContainer.appendChild(expToggle);
+    expContainer.appendChild(expContent);
+    overlay.appendChild(expContainer);
+
+    // Button Group
+    const btnGroup = document.createElement("div");
+    btnGroup.className = "wb-btn-group";
+
+    const neutBtn = document.createElement("button");
+    neutBtn.type = "button";
+    neutBtn.className = "wb-neutralize-btn";
+    neutBtn.textContent = "🌿 Ambient Neutralize (Calm Read)";
+    btnGroup.appendChild(neutBtn);
+
+    const unhideBtn = document.createElement("button");
+    unhideBtn.type = "button";
+    unhideBtn.className = "wb-unhide-btn";
+    unhideBtn.textContent = "Unhide Content";
+    btnGroup.appendChild(unhideBtn);
+
+    overlay.appendChild(btnGroup);
+
+    return { overlay, unhideBtn, neutBtn, neutContainer };
   }
 
   function applyBlur(node, result, postText = "") {
@@ -225,19 +343,40 @@
 
     node.classList.add("wb-target-blurred");
 
-    const { overlay, button } = buildOverlay(result);
+    const { overlay, unhideBtn, neutBtn, neutContainer } = buildOverlay(result, postText);
     wrapper.appendChild(overlay);
 
     let revealed = false;
-    button.addEventListener("click", (e) => {
+    let neutralized = false;
+
+    // Ambient Neutralize Click (Calm Read)
+    neutBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      neutralized = !neutralized;
+      neutContainer.style.display = neutralized ? "block" : "none";
+      neutBtn.textContent = neutralized ? "✕ Hide Calm Summary" : "🌿 Ambient Neutralize (Calm Read)";
+      neutBtn.classList.toggle("wb-btn-active", neutralized);
+    });
+
+    // Auto-neutralize if user enabled it in popup settings
+    if (settings.autoNeutralizeEnabled && (result.is_toxic || result.cross_modal_flagged)) {
+      neutralized = true;
+      neutContainer.style.display = "block";
+      neutBtn.textContent = "✕ Hide Calm Summary";
+      neutBtn.classList.add("wb-btn-active");
+    }
+
+    // Unhide Click
+    unhideBtn.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
       revealed = !revealed;
       node.classList.toggle("wb-target-blurred", !revealed);
       overlay.classList.toggle("wb-hidden", revealed);
-      button.textContent = revealed ? "Hide Again" : "Unhide Content";
+      unhideBtn.textContent = revealed ? "Hide Again" : "Unhide Content";
 
-      // Trigger personal adaptation update
+      // Trigger personal adaptation update (both on-device IndexedDB & backend SGD)
       recordUserFeedback(result.toxicity_score, revealed ? "unhide" : "rehide", postText);
     });
 
@@ -324,6 +463,9 @@
         foundNew = true;
         if (added.matches && added.matches(selector)) {
           processNode(added);
+        } else if (added.querySelectorAll) {
+          const children = added.querySelectorAll(selector);
+          children.forEach((c) => processNode(c));
         }
       }
     }

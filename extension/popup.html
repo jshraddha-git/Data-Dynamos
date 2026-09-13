@@ -297,6 +297,16 @@
         <span class="slider-toggle"></span>
       </label>
     </div>
+    <div class="row">
+      <div>
+        <span class="toggle-label">Auto Ambient Neutralize</span>
+        <div style="font-size: 10px; color: var(--green);">Rewrite rants into calm read</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="autoNeutralizeToggle" />
+        <span class="slider-toggle"></span>
+      </label>
+    </div>
   </section>
 
   <section id="personalizationSection">
@@ -315,9 +325,23 @@
     <div id="toleratedTags" style="display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; min-height: 18px;">
       <span style="color: var(--text-dim); font-size: 11px;">(None yet — unhide posts to adapt)</span>
     </div>
-    <div style="display: flex; gap: 6px;">
+    <div style="display: flex; gap: 6px; margin-bottom: 10px;">
       <button class="btn" id="refreshPersonalBtn" style="margin-top: 0; flex: 1;">Sync Model</button>
       <button class="btn" id="resetPersonalBtn" style="margin-top: 0; flex: 1; border-color: var(--red); color: var(--red); background: rgba(255,56,96,0.08);">Reset</button>
+    </div>
+
+    <!-- Model Adaptation USP: On-Device Vector Shifts via IndexedDB -->
+    <div style="padding-top: 8px; border-top: 1px dashed var(--border);">
+      <div style="font-size: 11px; color: var(--cyan); font-weight: 600; margin-bottom: 4px;">
+        💾 On-Device Vector Shifts (IndexedDB):
+      </div>
+      <div id="indexedDBStatus" style="font-size: 11px; color: var(--text-dim); margin-bottom: 6px;">
+        Checking local database...
+      </div>
+      <div id="indexedDBTerms" style="display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px;"></div>
+      <button class="btn" id="clearIndexedDBBtn" style="margin-top: 0; width: 100%; padding: 4px 8px; font-size: 11px; border-color: var(--orange); color: var(--orange); background: transparent;">
+        Clear On-Device IndexedDB
+      </button>
     </div>
   </section>
 

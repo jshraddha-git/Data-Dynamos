@@ -27,8 +27,37 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 
+import re
+
+STOP_WORDS = {
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and",
+    "any", "are", "aren't", "as", "at", "be", "because", "been", "before", "being",
+    "below", "between", "both", "but", "by", "can", "can't", "cannot", "could",
+    "couldn't", "did", "didn't", "do", "does", "doesn't", "doing", "don't", "down",
+    "during", "each", "few", "for", "from", "further", "had", "hadn't", "has",
+    "hasn't", "have", "haven't", "having", "he", "he'd", "he'll", "he's", "her",
+    "here", "here's", "hers", "herself", "him", "himself", "his", "how", "how's",
+    "i", "i'd", "i'll", "i'm", "i've", "if", "in", "into", "is", "isn't", "it",
+    "it's", "its", "itself", "let's", "me", "more", "most", "mustn't", "my",
+    "myself", "no", "nor", "not", "of", "off", "on", "once", "only", "or", "other",
+    "ought", "our", "ours", "ourselves", "out", "over", "own", "same", "shan't",
+    "she", "she'd", "she'll", "she's", "should", "shouldn't", "so", "some", "such",
+    "than", "that", "that's", "the", "their", "theirs", "them", "themselves",
+    "then", "there", "there's", "these", "they", "they'd", "they'll", "they're",
+    "they've", "this", "those", "through", "to", "too", "under", "until", "up",
+    "very", "was", "wasn't", "we", "we'd", "we'll", "we're", "we've", "were",
+    "weren't", "what", "what's", "when", "when's", "where", "where's", "which",
+    "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would",
+    "wouldn't", "you", "you'd", "you'll", "you're", "you've", "your", "yours",
+    "yourself", "yourselves", "get", "got", "just", "like", "look", "make",
+    "know", "think", "see", "come", "want", "give", "tell", "today", "yesterday",
+    "tomorrow", "fellow", "check", "progress", "placed", "year", "years", "much",
+    "many", "really", "will", "well", "also", "even", "back", "there", "good"
+}
+
+
 class OnlinePersonalizationEngine:
-    def __init__(self, learning_rate: float = 0.08, l2_reg: float = 0.005):
+    def __init__(self, learning_rate: float = 0.04, l2_reg: float = 0.01):
         self.learning_rate = learning_rate
         self.l2_reg = l2_reg
         self._user_cache: Dict[str, Dict[str, Any]] = {}
@@ -81,25 +110,29 @@ class OnlinePersonalizationEngine:
         Returns: (personalized_score, personal_shift_delta)
         """
         profile = self._load_user_profile(client_id)
-        if profile["total_feedback"] == 0:
+        if profile.get("total_feedback", 0) == 0:
             return base_score, 0.0
 
         weights: Dict[str, float] = profile.get("weights", {})
         learned_bias: float = profile.get("learned_bias", 0.0)
 
-        # Compute dot product over matching n-grams / words
-        lowered = text.lower()
-        words = set(lowered.split())
+        # Extract clean informative word tokens (length >= 4, non-stop-word)
+        tokens = set(re.findall(r"\b[a-z]{4,}\b", text.lower()))
+        tokens = {t for t in tokens if t not in STOP_WORDS}
         shift = learned_bias
 
         for word, weight in weights.items():
-            if word in words or (len(word) > 3 and word in lowered):
+            if word in tokens:
                 shift += weight
 
-        # Bound shift to prevent extreme runaway [-0.35, +0.35]
-        bounded_shift = float(np.clip(shift, -0.35, 0.35))
+        # Bound shift to prevent extreme runaway [-0.12, +0.12]
+        bounded_shift = float(np.clip(shift, -0.12, 0.12))
         
-        # Logistic / linear blending
+        # Safety floor: if base_score is heavily toxic (>= 0.65), do NOT allow personal shift
+        # to push it below 0.50 (safety guardrail against adversarial drift)
+        if base_score >= 0.65 and (base_score + bounded_shift) < 0.50:
+            bounded_shift = round(0.51 - base_score, 4)
+
         personalized_score = float(np.clip(base_score + bounded_shift, 0.0, 1.0))
         return round(personalized_score, 4), round(bounded_shift, 4)
 
@@ -119,41 +152,41 @@ class OnlinePersonalizationEngine:
         current_score, current_shift = self.score_post(text, base_score, client_id)
         error = current_score - target_y  # gradient of binary cross-entropy: p - y
 
-        # 1. Update global personal bias
+        # 1. Update global personal bias with tight bounds
         profile["learned_bias"] = float(np.clip(
-            (1.0 - self.l2_reg) * profile["learned_bias"] - (self.learning_rate * 0.5) * error,
-            -0.30, 0.30
+            (1.0 - self.l2_reg) * profile.get("learned_bias", 0.0) - (self.learning_rate * 0.5) * error,
+            -0.08, 0.08
         ))
 
-        # 2. Extract active tokens to apply gradient vector shifts
-        lowered = text.lower()
-        tokens = [w for w in lowered.split() if len(w) >= 3][:20]
-        weights = profile["weights"]
+        # 2. Extract active informative tokens (exclude stop words, min 4 chars)
+        raw_tokens = re.findall(r"\b[a-z]{4,}\b", text.lower())
+        informative_tokens = [w for w in raw_tokens if w not in STOP_WORDS][:15]
+        weights = profile.setdefault("weights", {})
 
-        for token in set(tokens):
+        for token in set(informative_tokens):
             w_curr = weights.get(token, 0.0)
             # SGD step with L2 decay
             w_next = (1.0 - self.l2_reg) * w_curr - self.learning_rate * error
-            # Clamp per-term shift
-            weights[token] = round(float(np.clip(w_next, -0.25, 0.25)), 4)
+            # Clamp per-term shift strictly to [-0.05, 0.05]
+            weights[token] = round(float(np.clip(w_next, -0.05, 0.05)), 4)
 
         # Prune near-zero weights to keep model sparse & lightweight
-        profile["weights"] = {k: v for k, v in weights.items() if abs(v) > 0.005}
+        profile["weights"] = {k: v for k, v in weights.items() if abs(v) > 0.008}
 
         # Update stats
         if action == "unhide":
-            profile["unhide_count"] += 1
+            profile["unhide_count"] = profile.get("unhide_count", 0) + 1
         else:
-            profile["rehide_count"] += 1
-        profile["total_feedback"] += 1
+            profile["rehide_count"] = profile.get("rehide_count", 0) + 1
+        profile["total_feedback"] = profile.get("total_feedback", 0) + 1
         profile["last_updated"] = time.time()
 
         self._save_user_profile(client_id)
 
         # Summarize top learned shifts
         sorted_weights = sorted(profile["weights"].items(), key=lambda x: x[1])
-        top_tolerated = [k for k, v in sorted_weights[:3] if v < -0.02]
-        top_strict = [k for k, v in sorted_weights[-3:] if v > 0.02]
+        top_tolerated = [k for k, v in sorted_weights[:3] if v < -0.01]
+        top_strict = [k for k, v in sorted_weights[-3:] if v > 0.01]
 
         return {
             "status": "updated",

@@ -181,9 +181,9 @@ def compute_cross_modal_disparity(
     # Malicious Subtlety Index: high visual tension + superficially low toxicity + sarcasm cue
     composite_disparity = 0.4 * cos_disparity + 0.6 * visual_tension
 
-    if sarcasm_detected and base_toxicity < 0.35:
-        # Heavily amplify disparity when explicit sarcasm cues clash with non-neutral visual tension
-        composite_disparity = max(composite_disparity, 0.76)
+    if sarcasm_detected and base_toxicity < 0.60:
+        # Heavily amplify disparity when explicit sarcasm cues clash with visual context
+        composite_disparity = max(composite_disparity, 0.78)
 
     is_flagged = bool(composite_disparity >= 0.70)
 
