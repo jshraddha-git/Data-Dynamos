@@ -19,15 +19,30 @@
   --wb-transition: 0.28s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* Container wrapper injected around flagged post */
+/* Sibling wrapper architecture - prevents CSS blur bleed into overlay */
 .wb-post-wrapper {
   position: relative !important;
   display: block !important;
   width: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
 }
 
-/* Blur applied to the post itself - blurs shadow DOM, text, media, comments */
+/* Post container blur - blurs entire post including all Shadow DOM content */
 .wb-target-blurred {
+  filter: blur(16px) brightness(0.6) !important;
+  pointer-events: none !important;
+  user-select: none !important;
+  transition: filter var(--wb-transition) !important;
+}
+
+/* Backward compatibility */
+.wb-post-blurred {
+  position: relative !important;
+}
+
+/* Blur all content children of the post, leaving the overlay crisp and unblurred */
+.wb-post-blurred > :not(.wb-overlay) {
   filter: blur(16px) brightness(0.6) !important;
   pointer-events: none !important;
   user-select: none !important;
@@ -165,8 +180,42 @@
   font-size: 11px !important;
 }
 
+.wb-btn-group {
+  display: flex !important;
+  flex-direction: row !important;
+  gap: 10px !important;
+  flex-wrap: wrap !important;
+  justify-content: center !important;
+  margin-top: 6px !important;
+}
+
+.wb-neutralize-btn {
+  padding: 8px 18px !important;
+  border-radius: 8px !important;
+  border: 1px solid var(--wb-neon-green) !important;
+  background: rgba(55, 242, 161, 0.16) !important;
+  color: #37f2a1 !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  pointer-events: auto !important;
+  box-shadow: 0 0 12px rgba(55, 242, 161, 0.25) !important;
+  transition: background var(--wb-transition), transform 0.15s ease !important;
+}
+
+.wb-neutralize-btn:hover {
+  background: rgba(55, 242, 161, 0.3) !important;
+  transform: translateY(-1px) !important;
+}
+
+.wb-neutralize-btn.wb-btn-active {
+  background: rgba(55, 242, 161, 0.4) !important;
+  color: #ffffff !important;
+  box-shadow: 0 0 16px rgba(55, 242, 161, 0.5) !important;
+}
+
 .wb-unhide-btn {
-  padding: 8px 22px !important;
+  padding: 8px 20px !important;
   border-radius: 8px !important;
   border: 1px solid var(--wb-neon-cyan) !important;
   background: rgba(52, 224, 255, 0.16) !important;
@@ -182,6 +231,87 @@
 .wb-unhide-btn:hover {
   background: rgba(52, 224, 255, 0.3) !important;
   transform: translateY(-1px) !important;
+}
+
+/* Ambient Neutralized Box (USP 2) */
+.wb-neutralized-container {
+  max-width: 90% !important;
+  width: 100% !important;
+  background: rgba(14, 28, 22, 0.95) !important;
+  border: 1px solid var(--wb-neon-green) !important;
+  border-radius: 8px !important;
+  padding: 12px 16px !important;
+  text-align: left !important;
+  box-shadow: 0 0 16px rgba(55, 242, 161, 0.2) !important;
+  animation: wb-fade-in 0.25s ease-out !important;
+  box-sizing: border-box !important;
+}
+
+.wb-neutralized-header {
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  color: var(--wb-neon-green) !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.5px !important;
+  margin-bottom: 6px !important;
+}
+
+.wb-neutralized-body {
+  font-size: 13.5px !important;
+  line-height: 1.5 !important;
+  color: #e8fdf5 !important;
+  font-style: italic !important;
+}
+
+/* Dual-Vector & Radar Sub-Cards (USP 1 & USP 3) */
+.wb-radar-card {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  border-radius: 6px !important;
+  padding: 8px 10px !important;
+  margin-bottom: 8px !important;
+  text-align: left !important;
+}
+
+.wb-radar-title {
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  color: var(--wb-neon-cyan) !important;
+  text-transform: uppercase !important;
+  margin-bottom: 6px !important;
+}
+
+.wb-radar-row {
+  display: flex !important;
+  justify-content: space-between !important;
+  font-size: 11px !important;
+  color: var(--wb-text) !important;
+  margin-bottom: 3px !important;
+}
+
+.wb-radar-val {
+  font-weight: 700 !important;
+}
+
+.wb-radar-bar-wrap {
+  width: 100% !important;
+  height: 5px !important;
+  background: rgba(255, 255, 255, 0.1) !important;
+  border-radius: 999px !important;
+  overflow: hidden !important;
+  margin-bottom: 6px !important;
+}
+
+.wb-radar-bar {
+  height: 100% !important;
+  border-radius: 999px !important;
+  transition: width 0.3s ease !important;
+}
+
+.wb-radar-note {
+  font-size: 10.5px !important;
+  color: var(--wb-text-dim) !important;
+  margin-top: 4px !important;
 }
 
 /* ---- Pre-post compose warning ---- */

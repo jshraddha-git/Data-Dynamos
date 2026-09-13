@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>AI Wellbeing Buffer — Test Feed</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f141c;
+      color: #e6edf3;
+      max-width: 680px;
+      margin: 40px auto;
+      padding: 0 20px;
+    }
+    h1 { font-size: 24px; color: #58a6ff; margin-bottom: 8px; }
+    p.subtitle { color: #8b949e; font-size: 14px; margin-bottom: 24px; }
+    .compose-card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 24px;
+    }
+    textarea {
+      width: 100%;
+      height: 80px;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      color: #fff;
+      padding: 10px;
+      font-size: 14px;
+      resize: vertical;
+      box-sizing: border-box;
+    }
+    article.post {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 18px;
+      margin-bottom: 18px;
+    }
+    .post-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: #388bfd;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+    }
+    .author-name { font-weight: 600; font-size: 15px; }
+    .author-handle { color: #8b949e; font-size: 13px; }
+    .post-body { font-size: 15px; line-height: 1.5; color: #c9d1d9; }
+  </style>
+</head>
+<body>
+  <h1>AI Wellbeing Buffer — Verification Feed</h1>
+  <p class="subtitle">Open this page in Chrome with the AI Wellbeing Buffer extension active.</p>
+
+  <div class="compose-card">
+    <h3 style="margin-top:0; font-size: 15px;">Compose Watcher Test</h3>
+    <textarea placeholder="Type toxic draft here (e.g. 'you are an idiot')..."></textarea>
+  </div>
+
+  <!-- Post 1: Severe Toxicity (Should be blurred) -->
+  <article class="post">
+    <div class="post-header">
+      <div class="avatar" style="background:#da3633;">T</div>
+      <div>
+        <div class="author-name">Toxic User</div>
+        <div class="author-handle">@angry_troll</div>
+      </div>
+    </div>
+    <div class="post-body">
+      You are an idiot and nobody likes you, shut up and delete your account you pathetic loser.
+    </div>
+  </article>
+
+  <!-- Post 2: Trigger Topic (Layoffs) -->
+  <article class="post">
+    <div class="post-header">
+      <div class="avatar" style="background:#8957e5;">N</div>
+      <div>
+        <div class="author-name">Tech Industry Wire</div>
+        <div class="author-handle">@techwire</div>
+      </div>
+    </div>
+    <div class="post-body">
+      Massive corporate restructuring underway: 12,000 tech employees impacted in latest round of layoffs across engineering and operations.
+    </div>
+  </article>
+
+  <!-- Post 3: Benign Post (Should remain visible) -->
+  <article class="post">
+    <div class="post-header">
+      <div class="avatar" style="background:#238636;">A</div>
+      <div>
+        <div class="author-name">Alex Rivers</div>
+        <div class="author-handle">@arivers</div>
+      </div>
+    </div>
+    <div class="post-body">
+      Just pushed our first open-source release! Really excited about the community feedback so far. What are you building this weekend?
+    </div>
+  </article>
+
+  <!-- Post 4: Multimodal Joint Scoring: Malicious Subtlety Meme -->
+  <article class="post">
+    <div class="post-header">
+      <div class="avatar" style="background:#ff3b94;">M</div>
+      <div>
+        <div class="author-name">Meme Poster</div>
+        <div class="author-handle">@subtle_troll</div>
+      </div>
+    </div>
+    <div class="post-body">
+      what a hero, wow so lovely and peaceful
+    </div>
+    <div style="margin-top: 10px;">
+      <img src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='200' viewBox='0 0 400 200'><rect width='100%' height='100%' fill='%23200a18'/><text x='50%' y='50%' fill='%23ff3860' font-size='16' font-family='sans-serif' font-weight='bold' text-anchor='middle'>[Antagonistic Visual Context / Provocative Meme]</text></svg>" style="width: 100%; border-radius: 8px; border: 1px solid #ff3860;" />
+    </div>
+  </article>
+</body>
+</html>

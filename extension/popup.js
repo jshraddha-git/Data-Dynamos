@@ -14,6 +14,7 @@ const el = {
   enabledToggle: document.getElementById("enabledToggle"),
   nsfwToggle: document.getElementById("nsfwToggle"),
   draftToggle: document.getElementById("draftToggle"),
+  autoNeutralizeToggle: document.getElementById("autoNeutralizeToggle"),
   adaptiveToggle: document.getElementById("adaptiveToggle"),
   adaptiveStatus: document.getElementById("adaptiveStatus"),
   triggerTags: document.getElementById("triggerTags"),
@@ -33,6 +34,9 @@ const el = {
   toleratedTags: document.getElementById("toleratedTags"),
   refreshPersonalBtn: document.getElementById("refreshPersonalBtn"),
   resetPersonalBtn: document.getElementById("resetPersonalBtn"),
+  indexedDBStatus: document.getElementById("indexedDBStatus"),
+  indexedDBTerms: document.getElementById("indexedDBTerms"),
+  clearIndexedDBBtn: document.getElementById("clearIndexedDBBtn"),
 };
 
 const DEFAULTS = {
@@ -40,6 +44,7 @@ const DEFAULTS = {
   userTriggers: ["spoilers", "layoffs"],
   nsfwFilteringEnabled: true,
   draftCheckEnabled: true,
+  autoNeutralizeEnabled: false,
   extensionEnabled: true,
   adaptiveSensitivityEnabled: true,
   learnedSensitivityAdjustment: 0.0,
@@ -59,6 +64,7 @@ function loadSettings() {
     el.enabledToggle.checked = settings.extensionEnabled;
     el.nsfwToggle.checked = settings.nsfwFilteringEnabled;
     el.draftToggle.checked = settings.draftCheckEnabled;
+    if (el.autoNeutralizeToggle) el.autoNeutralizeToggle.checked = settings.autoNeutralizeEnabled || false;
     el.adaptiveToggle.checked = settings.adaptiveSensitivityEnabled;
 
     // Display adaptive adjustment status
@@ -122,6 +128,12 @@ el.nsfwToggle.addEventListener("change", () => {
 el.draftToggle.addEventListener("change", () => {
   chrome.storage.local.set({ draftCheckEnabled: el.draftToggle.checked });
 });
+
+if (el.autoNeutralizeToggle) {
+  el.autoNeutralizeToggle.addEventListener("change", () => {
+    chrome.storage.local.set({ autoNeutralizeEnabled: el.autoNeutralizeToggle.checked });
+  });
+}
 
 el.adaptiveToggle.addEventListener("change", () => {
   chrome.storage.local.set({ adaptiveSensitivityEnabled: el.adaptiveToggle.checked });
@@ -256,6 +268,10 @@ async function refreshPersonalizationStats() {
         const bias = data.learned_bias || 0.0;
         const sign = bias > 0 ? "+" : "";
         el.statLearnedBias.textContent = `${sign}${bias.toFixed(3)}`;
+        chrome.storage.local.set({ learnedSensitivityAdjustment: bias });
+        if (el.adaptiveStatus && el.adaptiveToggle && el.adaptiveToggle.checked) {
+          el.adaptiveStatus.textContent = `Shift: ${sign}${bias.toFixed(2)}`;
+        }
       }
       if (el.statActiveTerms) {
         el.statActiveTerms.textContent = data.active_feature_shifts || 0;
@@ -303,8 +319,46 @@ if (el.refreshPersonalBtn) el.refreshPersonalBtn.addEventListener("click", refre
 if (el.resetPersonalBtn) el.resetPersonalBtn.addEventListener("click", resetPersonalizationModel);
 
 // ---------------------------------------------------------------------
+// Model Adaptation USP: IndexedDB On-Device Vector Inspector
+// ---------------------------------------------------------------------
+function refreshIndexedDBInspector() {
+  chrome.runtime.sendMessage({ type: "wb-db-get-all-shifts" }, (res) => {
+    if (!res || !res.ok) {
+      if (el.indexedDBStatus) el.indexedDBStatus.textContent = "IndexedDB active in background.";
+      return;
+    }
+    const records = res.data || [];
+    if (el.indexedDBStatus) {
+      el.indexedDBStatus.textContent = records.length === 0
+        ? "Local database empty (unhide/rehide posts to adapt on-device)."
+        : `${records.length} on-device vector shift(s) active on this browser:`;
+    }
+    if (el.indexedDBTerms) {
+      el.indexedDBTerms.innerHTML = "";
+      records.slice(0, 12).forEach((item) => {
+        const span = document.createElement("span");
+        span.className = "tag";
+        const isTolerated = item.weight < 0;
+        span.style.cssText = `background: ${isTolerated ? "rgba(55, 242, 161, 0.15)" : "rgba(255, 56, 96, 0.15)"}; border: 1px solid ${isTolerated ? "var(--green)" : "var(--red)"}; color: ${isTolerated ? "var(--green)" : "var(--red)"}; padding: 2px 7px; font-size: 11px; border-radius: 4px;`;
+        span.textContent = `"${item.term}" (${item.weight > 0 ? "+" : ""}${item.weight})`;
+        el.indexedDBTerms.appendChild(span);
+      });
+    }
+  });
+}
+
+if (el.clearIndexedDBBtn) {
+  el.clearIndexedDBBtn.addEventListener("click", () => {
+    chrome.runtime.sendMessage({ type: "wb-db-reset-shifts" }, () => {
+      refreshIndexedDBInspector();
+    });
+  });
+}
+
+// ---------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------
 loadSettings();
 refreshMoodDashboard();
 refreshPersonalizationStats();
+refreshIndexedDBInspector();

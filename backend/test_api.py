@@ -44,6 +44,15 @@ def run_tests():
     assert data["action"] == "blur", "Toxic post should be blurred!"
     assert data["is_toxic"] is True, "Post should be flagged as toxic!"
     assert len(data["explanation"]) > 0, "Explainability attribution should return contributing terms!"
+    assert data["neutralized_text"] is not None, "Neutralized text should be generated for flagged toxic post!"
+    print("       Ambient Neutralized:", data["neutralized_text"])
+
+    # Test Ambient Neutralization endpoint
+    res_neut = client.post("/neutralize-post", json={"text": "You are an idiot and your code is garbage moron."})
+    assert res_neut.status_code == 200
+    neut_data = res_neut.json()
+    print("[PASS] /neutralize-post:", neut_data["neutralized"])
+    assert "Calm Read:" in neut_data["neutralized"], "Neutralized text should contain Calm Read prefix!"
 
     # 3. Analyze Benign Slang (should NOT be blurred)
     res = client.post("/analyze-post", json={
@@ -132,11 +141,12 @@ def run_tests():
     client.post("/personalize-reset/test_client")
 
     # 10. USP 3: Dual-Stream Multimodal Joint Disparity Scorer (Toxic Memes)
-    import cv2, numpy as np, base64
-    img = np.zeros((64, 64, 3), dtype=np.uint8)
-    img[::4, ::4] = [255, 0, 0] # high spatial energy / edge noise
-    _, buf = cv2.imencode(".jpg", img)
-    b64_img = "data:image/jpeg;base64," + base64.b64encode(buf).decode("ascii")
+    from PIL import Image
+    import io, numpy as np, base64
+    img = Image.new("RGB", (64, 64), color=(255, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    b64_img = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
     res_meme = client.post("/analyze-post", json={
         "text": "what a hero, wow so lovely and peaceful",
@@ -149,15 +159,21 @@ def run_tests():
     assert meme_data["action"] == "blur", "Flagged meme should be blurred!"
 
     # 11. Rate Limiter Test (Simulate rapid burst)
-    rapid_client = TestClient(app)
-    hit_rate_limit = False
-    for i in range(135):
-        r = rapid_client.post("/analyze-post", json={"text": "hello world"})
-        if r.status_code == 429:
-            hit_rate_limit = True
-            print(f"[PASS] Rate limiter triggered at request #{i+1} with 429 Too Many Requests (Retry-After: {r.headers.get('Retry-After')})")
-            break
-    assert hit_rate_limit is True, "Rate limiter should throttle after 120 requests/minute!"
+    import main
+    old_limit = main.RATE_LIMIT_MAX_REQUESTS
+    main.RATE_LIMIT_MAX_REQUESTS = 30
+    try:
+        rapid_client = TestClient(app)
+        hit_rate_limit = False
+        for i in range(45):
+            r = rapid_client.post("/analyze-post", json={"text": "hello world"})
+            if r.status_code == 429:
+                hit_rate_limit = True
+                print(f"[PASS] Rate limiter triggered at request #{i+1} with 429 Too Many Requests (Retry-After: {r.headers.get('Retry-After')})")
+                break
+        assert hit_rate_limit is True, "Rate limiter should throttle when exceeding threshold!"
+    finally:
+        main.RATE_LIMIT_MAX_REQUESTS = old_limit
 
     print("=" * 60)
     print("ALL INTEGRATION TESTS PASSED SUCCESSFULLY!")

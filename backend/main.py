@@ -49,6 +49,7 @@ from pydantic import BaseModel, Field
 from multimodal_scorer import compute_cross_modal_disparity
 from personalization_engine import personalization_engine
 from dual_vector_fusion import dual_vector_fusion
+from ambient_neutralizer import ambient_neutralizer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.environ.get("MODEL_PATH", os.path.join(BASE_DIR, "custom_toxic_model.joblib"))
@@ -516,6 +517,11 @@ class AnalyzePostResponse(BaseModel):
     cross_modal_details: Dict[str, Any] = Field(default_factory=dict)
     personal_shift: float = 0.0
     dual_vector_meta: Dict[str, Any] = Field(default_factory=dict)
+    neutralized_text: Optional[str] = None
+
+
+class NeutralizePostRequest(BaseModel):
+    text: str
 
 
 class PersonalizeFeedbackRequest(BaseModel):
@@ -610,6 +616,11 @@ def analyze_post(payload: AnalyzePostRequest, _auth: bool = Depends(verify_api_k
     else:
         reason = "No issues detected"
 
+    neutralized_text = None
+    if should_blur or is_toxic or is_cross_modal:
+        neut_res = ambient_neutralizer.neutralize(payload.text)
+        neutralized_text = neut_res["neutralized"]
+
     return AnalyzePostResponse(
         action=action,
         is_toxic=is_toxic,
@@ -624,7 +635,14 @@ def analyze_post(payload: AnalyzePostRequest, _auth: bool = Depends(verify_api_k
         cross_modal_details=cm_details,
         personal_shift=personal_shift,
         dual_vector_meta=dv_meta,
+        neutralized_text=neutralized_text,
     )
+
+
+@app.post("/neutralize-post")
+def neutralize_post(payload: NeutralizePostRequest, _auth: bool = Depends(verify_api_key)):
+    """User Experience USP: Rewrites hostile text into a calm, objective neutral summary."""
+    return ambient_neutralizer.neutralize(payload.text)
 
 
 @app.post("/personalize-feedback")

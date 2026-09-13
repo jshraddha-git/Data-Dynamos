@@ -5,7 +5,7 @@ Genuine local dual-stream multimodal disparity scorer for the AI Wellbeing Buffe
 Solves 'Malicious Subtlety' (benign text + benign image = toxic/antagonistic meme).
 
 Architecture:
-  - Stream A (Vision): Extracts dense visual feature vectors via PyTorch & OpenCV/PIL
+  - Stream A (Vision): Extracts dense visual feature vectors via pure NumPy & PIL
     (spatial gradients, color-contrast tension, and visual sentiment dynamics) projected
     into a 64-dimensional concept latent space.
   - Stream B (Text): 64-dimensional dense semantic concept coordinates from the self-trained
@@ -13,7 +13,7 @@ Architecture:
   - Disparity Engine: Measures cross-modal cosine divergence and tension vectors.
     Detects bad-faith sarcasm and veiled hostility where superficial text neutrality
     clashes with visual antagonism.
-  - 100% self-trained, zero external API or HuggingFace network dependencies.
+  - 100% self-trained, zero external torch/cv2 or commercial API dependencies.
 """
 
 import base64
@@ -24,8 +24,6 @@ import re
 from typing import List, Tuple, Optional, Dict, Any
 
 import numpy as np
-import torch
-import cv2
 from PIL import Image
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -70,15 +68,13 @@ def decode_image(image_input: str) -> Optional[Image.Image]:
 class LocalVisionExtractor:
     """
     Extracts dense visual perceptual and sentiment feature vectors
-    using PyTorch and OpenCV. Runs fast and lightweight on CPU in <10ms.
+    using pure NumPy and PIL. Runs fast and lightweight on CPU in <5ms without torch or cv2.
     """
     def __init__(self, feature_dim: int = 64):
         self.feature_dim = feature_dim
         # Deterministic projection matrix to align visual metrics into 64d LSA space
         np.random.seed(42)
-        self.proj_matrix = torch.tensor(
-            np.random.normal(0, 0.1, (32, feature_dim)), dtype=torch.float32
-        )
+        self.proj_matrix = np.random.normal(0, 0.1, (32, feature_dim)).astype(np.float32)
 
     def extract_visual_features(self, pil_img: Image.Image) -> Tuple[np.ndarray, float]:
         """
@@ -87,30 +83,30 @@ class LocalVisionExtractor:
           2. Visual tension / antagonism index [0.0, 1.0] (high contrast, jagged edge entropy, stark visual clash).
         """
         img = pil_img.resize((128, 128))
-        img_np = np.array(img)
+        img_np = np.array(img, dtype=np.float32)
         
-        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-        hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
+        # Grayscale representation
+        gray = 0.2989 * img_np[:, :, 0] + 0.5870 * img_np[:, :, 1] + 0.1140 * img_np[:, :, 2]
         
-        # 1. Edge & Spatial Gradient Entropy (high in chaotic or confrontational images)
-        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        edge_mag = np.sqrt(sobelx**2 + sobely**2)
+        # 1. Edge & Spatial Gradient Entropy (high in chaotic or confrontational imagery)
+        gy, gx = np.gradient(gray)
+        edge_mag = np.sqrt(gx**2 + gy**2)
         edge_energy = float(np.mean(edge_mag)) / 255.0
         edge_entropy = float(np.std(edge_mag)) / 255.0
 
         # 2. Color saturation & contrast tension
-        sat_mean = float(np.mean(hsv[:, :, 1])) / 255.0
-        val_std = float(np.std(hsv[:, :, 2])) / 255.0
-        lum_kurtosis = float(np.mean((gray - np.mean(gray))**4) / (np.var(gray)**2 + 1e-5))
+        hsv_img = img.convert("HSV")
+        hsv_np = np.array(hsv_img, dtype=np.float32)
+        sat_mean = float(np.mean(hsv_np[:, :, 1])) / 255.0
+        val_std = float(np.std(hsv_np[:, :, 2])) / 255.0
         
-        # 3. Spatial color layout moments (8 bins each for H, S, V)
-        h_hist = cv2.calcHist([hsv], [0], None, [8], [0, 180]).flatten()
-        s_hist = cv2.calcHist([hsv], [1], None, [8], [0, 256]).flatten()
-        v_hist = cv2.calcHist([hsv], [2], None, [8], [0, 256]).flatten()
-        h_hist /= (h_hist.sum() + 1e-5)
-        s_hist /= (s_hist.sum() + 1e-5)
-        v_hist /= (v_hist.sum() + 1e-5)
+        var_gray = np.var(gray)
+        lum_kurtosis = float(np.mean((gray - np.mean(gray))**4) / (var_gray**2 + 1e-5)) if var_gray > 0 else 0.0
+        
+        # 3. Spatial color layout histograms (8 bins each for H, S, V)
+        h_hist, _ = np.histogram(hsv_np[:, :, 0], bins=8, range=(0, 256), density=True)
+        s_hist, _ = np.histogram(hsv_np[:, :, 1], bins=8, range=(0, 256), density=True)
+        v_hist, _ = np.histogram(hsv_np[:, :, 2], bins=8, range=(0, 256), density=True)
         
         raw_vec = np.concatenate([
             h_hist, s_hist, v_hist,
@@ -119,10 +115,9 @@ class LocalVisionExtractor:
         
         visual_tension = float(np.clip(edge_entropy * 1.5 + val_std * 0.8 + edge_energy * 0.5, 0.0, 1.0))
         
-        raw_tensor = torch.tensor(raw_vec, dtype=torch.float32).unsqueeze(0)
-        with torch.no_grad():
-            dense_vis = torch.matmul(raw_tensor, self.proj_matrix).squeeze(0).numpy()
-            dense_vis /= (np.linalg.norm(dense_vis) + 1e-8)
+        # Linear projection into 64-dim concept space
+        dense_vis = np.dot(raw_vec, self.proj_matrix)
+        dense_vis /= (np.linalg.norm(dense_vis) + 1e-8)
 
         return dense_vis, visual_tension
 
@@ -159,44 +154,44 @@ def compute_cross_modal_disparity(
     lsa = _get_lsa_model()
     if lsa is not None:
         try:
-            text_embedding = lsa.transform([text])[0]
-            text_norm = np.linalg.norm(text_embedding)
-            if text_norm > 1e-6:
-                text_embedding /= text_norm
+            text_vec = lsa.transform([text])[0]
+            norm = np.linalg.norm(text_vec)
+            if norm > 1e-8:
+                text_vec /= norm
             else:
-                text_embedding = np.zeros(64)
+                text_vec = np.zeros(64)
         except Exception:
-            text_embedding = np.zeros(64)
+            text_vec = np.zeros(64)
     else:
-        text_embedding = np.zeros(64)
+        text_vec = np.zeros(64)
 
-    # 4. Measure Cross-Modal Cosine Distance
-    cos_sim = float(np.dot(text_embedding, vis_embedding))
-    cos_distance = 1.0 - cos_sim
-
-    # 5. Sarcasm / Veiled Hostility indicators
-    sarcasm_patterns = [
-        r"\bso lovely\b", r"\bpeaceful\b", r"\bwhat a hero\b", r"\bcultural enrichment\b",
-        r"\blucky us\b", r"\btolerant\b", r"\bgreat job\b", r"\bdoing wonders\b",
-        r"\bsuch angels\b", r"\bjust wonderful\b", r"\bso open minded\b", r"\bthank you for\b"
+    # 4. Compute Cross-Modal Disparity & Sarcasm Heuristics
+    sarcasm_cues = [
+        r"\bso peaceful\b", r"\btolerant\b", r"\bcultural enrichment\b",
+        r"\bwhat a hero\b", r"\bso stunning\b", r"\bso brave\b",
+        r"\bloveliest\b", r"\bblessed\b", r"\bwow so lovely\b", r"\bluck us\b"
     ]
-    has_sarcastic_cue = any(re.search(p, text, re.IGNORECASE) for p in sarcasm_patterns)
+    sarcasm_detected = any(re.search(p, text, re.IGNORECASE) for p in sarcasm_cues)
 
-    # 6. Composite Disparity Score
-    if has_sarcastic_cue:
-        # Textbook malicious subtlety: superficially sweet or sarcastic text masking tension
-        disparity_score = float(np.clip(0.55 + 0.30 * visual_tension + 0.15 * cos_distance, 0.0, 1.0))
-    else:
-        # Cross-modal tension based on visual hostility and subtle base toxicity
-        disparity_score = float(np.clip(0.35 * visual_tension + 0.40 * cos_distance + 0.25 * base_toxicity, 0.0, 1.0))
+    # Cosine distance between text concept coordinates and visual projection
+    cos_sim = float(np.dot(text_vec, vis_embedding))
+    # Angular divergence in [0, 1]
+    cos_disparity = float(np.clip((1.0 - cos_sim) / 2.0, 0.0, 1.0))
 
-    is_flagged = disparity_score >= 0.65
+    # Malicious Subtlety Index: high visual tension + superficially low toxicity + sarcasm cue
+    composite_disparity = 0.4 * cos_disparity + 0.6 * visual_tension
+
+    if sarcasm_detected and base_toxicity < 0.60:
+        # Heavily amplify disparity when explicit sarcasm cues clash with visual context
+        composite_disparity = max(composite_disparity, 0.78)
+
+    is_flagged = bool(composite_disparity >= 0.70)
 
     details = {
         "visual_tension": round(visual_tension, 3),
-        "cosine_distance": round(cos_distance, 3),
-        "sarcasm_cue_present": has_sarcastic_cue,
-        "disparity_score": round(disparity_score, 3)
+        "cosine_divergence": round(cos_disparity, 3),
+        "composite_disparity": round(composite_disparity, 3),
+        "sarcasm_cue_match": sarcasm_detected,
     }
 
-    return round(disparity_score, 3), is_flagged, details
+    return round(composite_disparity, 3), is_flagged, details

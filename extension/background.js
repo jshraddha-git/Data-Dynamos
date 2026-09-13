@@ -14,6 +14,12 @@
  *   4. Reads backend URL and API Key dynamically from chrome.storage.local.
  */
 
+try {
+  importScripts("indexeddb_vector_engine.js", "ambient_neutralizer.js");
+} catch (e) {
+  console.warn("[Wellbeing Buffer] Service worker importScripts error:", e);
+}
+
 const DEFAULT_API_BASE = "http://localhost:8000";
 
 async function getBackendConfig() {
@@ -135,6 +141,69 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     forwardToBackend("/calculate-mood-impact", message.payload, "POST")
       .then((data) => sendResponse({ ok: true, data }))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+
+  // Model Adaptation USP: IndexedDB On-Device Vector Shifts
+  if (message.type === "wb-db-get-shift") {
+    if (typeof self.IndexedDBVectorEngine !== "undefined") {
+      self.IndexedDBVectorEngine.computeLocalShift(message.payload.text)
+        .then((data) => sendResponse({ ok: true, data }))
+        .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    } else {
+      sendResponse({ ok: true, data: { shift: 0.0, matchedTerms: [] } });
+    }
+    return true;
+  }
+
+  if (message.type === "wb-db-record-shift") {
+    if (typeof self.IndexedDBVectorEngine !== "undefined") {
+      self.IndexedDBVectorEngine.recordFeedbackStep(
+        message.payload.text,
+        message.payload.action,
+        message.payload.baseScore || 0.5
+      )
+        .then((data) => sendResponse({ ok: true, data }))
+        .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    } else {
+      sendResponse({ ok: true, data: { updated: 0 } });
+    }
+    return true;
+  }
+
+  if (message.type === "wb-db-get-all-shifts") {
+    if (typeof self.IndexedDBVectorEngine !== "undefined") {
+      self.IndexedDBVectorEngine.getAllShifts()
+        .then((data) => sendResponse({ ok: true, data }))
+        .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    } else {
+      sendResponse({ ok: true, data: [] });
+    }
+    return true;
+  }
+
+  if (message.type === "wb-db-reset-shifts") {
+    if (typeof self.IndexedDBVectorEngine !== "undefined") {
+      self.IndexedDBVectorEngine.resetShifts()
+        .then((data) => sendResponse({ ok: true, data }))
+        .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    } else {
+      sendResponse({ ok: true, data: { status: "cleared" } });
+    }
+    return true;
+  }
+
+  // User Experience USP: Ambient Neutralization
+  if (message.type === "wb-neutralize-post") {
+    forwardToBackend("/neutralize-post", { text: message.payload.text }, "POST")
+      .then((data) => sendResponse({ ok: true, data }))
+      .catch(() => {
+        if (typeof self.AmbientNeutralizerClient !== "undefined") {
+          sendResponse({ ok: true, data: self.AmbientNeutralizerClient.neutralize(message.payload.text) });
+        } else {
+          sendResponse({ ok: true, data: { neutralized: `[Calm Read: The author expresses disagreement.]` } });
+        }
+      });
     return true;
   }
 

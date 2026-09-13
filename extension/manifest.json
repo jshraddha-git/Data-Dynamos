@@ -11,26 +11,12 @@
   "host_permissions": [
     "http://localhost:8000/*",
     "http://127.0.0.1:8000/*",
-    "*://*.twitter.com/*",
-    "*://*.x.com/*",
-    "*://*.reddit.com/*",
-    "*://*.facebook.com/*",
-    "*://*.instagram.com/*",
-    "*://*.tiktok.com/*",
-    "*://*.linkedin.com/*",
-    "*://*.youtube.com/*"
+    "<all_urls>"
   ],
   "content_scripts": [
     {
       "matches": [
-        "*://*.twitter.com/*",
-        "*://*.x.com/*",
-        "*://*.reddit.com/*",
-        "*://*.facebook.com/*",
-        "*://*.instagram.com/*",
-        "*://*.tiktok.com/*",
-        "*://*.linkedin.com/*",
-        "*://*.youtube.com/*"
+        "<all_urls>"
       ],
       "js": [
         "adapters/base_adapter.js",
@@ -43,6 +29,7 @@
         "adapters/youtube.js",
         "adapters/generic.js",
         "adapters/index.js",
+        "ambient_neutralizer.js",
         "content.js"
       ],
       "css": ["styles.css"],
