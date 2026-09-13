@@ -19,5 +19,5 @@
     ]
   ],
   "model_path": "C:\\Users\\Shraddha\\Downloads\\ai-wellbeing-layer-fixed\\ai-wellbeing-layer\\backend\\custom_toxic_model.joblib",
-  "training_seconds": 0.3
+  "training_seconds": 0.29
 }

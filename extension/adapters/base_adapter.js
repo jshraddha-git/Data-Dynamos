@@ -19,12 +19,12 @@ class BasePlatformAdapter {
 
   /** CSS selector identifying individual post or comment containers */
   getPostSelector() {
-    return "article, [role='article'], .post, .comment";
+    return "article, [role='article'], .post, .comment, [data-testid*='search-post'], [data-testid*='search-result'], .search-result";
   }
 
-  /** CSS selector identifying text inputs / compose boxes */
+  /** CSS selector identifying text inputs / compose boxes and search inputs */
   getComposeSelector() {
-    return "textarea, [contenteditable='true'], input[type='text'], div[role='textbox']";
+    return "textarea, [contenteditable='true'], input[type='text'], input[type='search'], input[name='q'], [role='searchbox'], div[role='textbox'], input[placeholder*='Search' i]";
   }
 
   /** Extracts text content from a post node */
