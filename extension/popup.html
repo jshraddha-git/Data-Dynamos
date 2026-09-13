@@ -299,6 +299,28 @@
     </div>
   </section>
 
+  <section id="personalizationSection">
+    <h2>Adaptive Personalization (Online ML)</h2>
+    <div class="stat-grid">
+      <div class="stat-box">
+        <div class="value" id="statLearnedBias">0.00</div>
+        <div class="label">Personal Bias Shift</div>
+      </div>
+      <div class="stat-box">
+        <div class="value" id="statActiveTerms">0</div>
+        <div class="label">Learned Vectors</div>
+      </div>
+    </div>
+    <div style="font-size: 11px; color: var(--text-dim); margin-bottom: 4px;">Top Tolerated Terms (Self-Trained):</div>
+    <div id="toleratedTags" style="display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; min-height: 18px;">
+      <span style="color: var(--text-dim); font-size: 11px;">(None yet — unhide posts to adapt)</span>
+    </div>
+    <div style="display: flex; gap: 6px;">
+      <button class="btn" id="refreshPersonalBtn" style="margin-top: 0; flex: 1;">Sync Model</button>
+      <button class="btn" id="resetPersonalBtn" style="margin-top: 0; flex: 1; border-color: var(--red); color: var(--red); background: rgba(255,56,96,0.08);">Reset</button>
+    </div>
+  </section>
+
   <section>
     <h2>LSA Semantic Triggers</h2>
     <div id="triggerTags"></div>

@@ -1,0 +1,13 @@
+{
+  "client_id": "user_test",
+  "weights": {
+    "borderline": -0.044,
+    "slang": -0.044,
+    "phrase": -0.044
+  },
+  "unhide_count": 1,
+  "rehide_count": 0,
+  "total_feedback": 1,
+  "learned_bias": -0.022000000000000002,
+  "last_updated": 1789260918.3557074
+}

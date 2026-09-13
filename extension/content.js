@@ -22,7 +22,7 @@
   // ---------------------------------------------------------------------
   const DEFAULT_SETTINGS = {
     toxicityThreshold: 0.5,
-    userTriggers: [],
+    userTriggers: ["spoilers", "layoffs"],
     nsfwFilteringEnabled: true,
     draftCheckEnabled: true,
     extensionEnabled: true,
@@ -75,13 +75,27 @@
     return Math.max(0.15, Math.min(0.95, adjusted));
   }
 
-  function recordUserFeedback(score, action) {
+  function recordUserFeedback(score, action, postText = "") {
     if (!settings.adaptiveSensitivityEnabled) return;
+
+    // Dispatch feedback to backend online SGD personalization engine
+    if (postText) {
+      chrome.runtime.sendMessage({
+        type: "wb-personalize-feedback",
+        payload: {
+          text: postText,
+          action: action,
+          base_score: score || 0.5,
+          client_id: "default",
+        },
+      }).catch((err) => console.warn("[Wellbeing Buffer] Personalize feedback failed:", err));
+    }
+
     chrome.storage.local.get(["learnedSensitivityAdjustment", "unhideCount"], (data) => {
       let adj = data.learnedSensitivityAdjustment || 0.0;
       let count = (data.unhideCount || 0) + 1;
 
-      // If user unhides borderline content (0.45 - 0.75), increase tolerance
+      // If user unhides borderline content (0.40 - 0.80), increase tolerance
       if (action === "unhide") {
         if (score >= 0.40 && score <= 0.80) {
           adj = Math.min(0.20, adj + 0.02);
@@ -195,26 +209,36 @@
     return { overlay, button };
   }
 
-  function applyBlur(node, result) {
-    if (getComputedStyle(node).position === "static") {
-      node.style.position = "relative";
+  function applyBlur(node, result, postText = "") {
+    if (!node || node._wbBlurred || !node.parentNode) return;
+    node._wbBlurred = true;
+
+    // Wrap node so the overlay is an external sibling, never affected by post blur
+    let wrapper = node.parentElement;
+    if (!wrapper || !wrapper.classList.contains("wb-post-wrapper")) {
+      wrapper = document.createElement("div");
+      wrapper.className = "wb-post-wrapper";
+      wrapper.style.cssText = "position: relative !important; display: block !important; width: 100% !important; margin: 0 !important; padding: 0 !important;";
+      node.parentNode.insertBefore(wrapper, node);
+      wrapper.appendChild(node);
     }
-    node.classList.add("wb-wrapper", "wb-blurred");
+
+    node.classList.add("wb-target-blurred");
 
     const { overlay, button } = buildOverlay(result);
-    node.appendChild(overlay);
+    wrapper.appendChild(overlay);
 
     let revealed = false;
     button.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
       revealed = !revealed;
-      node.classList.toggle("wb-revealed", revealed);
+      node.classList.toggle("wb-target-blurred", !revealed);
       overlay.classList.toggle("wb-hidden", revealed);
       button.textContent = revealed ? "Hide Again" : "Unhide Content";
 
       // Trigger personal adaptation update
-      recordUserFeedback(result.toxicity_score, revealed ? "unhide" : "rehide");
+      recordUserFeedback(result.toxicity_score, revealed ? "unhide" : "rehide", postText);
     });
 
     // Update session metrics
@@ -230,21 +254,39 @@
   // ---------------------------------------------------------------------
   const processedNodes = new WeakSet();
 
-  async function processNode(node) {
-    if (!settings.extensionEnabled) return;
+  async function processNode(node, retryCount = 0) {
+    if (!settings.extensionEnabled || !node) return;
     if (processedNodes.has(node)) return;
-    processedNodes.add(node);
 
     if (!activeAdapter) {
       activeAdapter = window.WellbeingAdapterRegistry.getActiveAdapter();
     }
 
     const postData = activeAdapter.extractPostData(node);
-    if (!postData.text && postData.media.length === 0) return;
+
+    // If node was just mounted and content hasn't rendered yet, retry after short delay
+    if (!postData.text && postData.media.length === 0) {
+      if (retryCount < 4) {
+        setTimeout(() => {
+          if (!processedNodes.has(node)) {
+            processNode(node, retryCount + 1);
+          }
+        }, 200 * (retryCount + 1));
+      }
+      return;
+    }
+
+    processedNodes.add(node);
 
     const result = await analyzePost(postData.text, postData.media);
-    if (result && result.action === "blur") {
-      applyBlur(node, result);
+    if (!result) {
+      // Backend temporarily unreachable or rate limited; allow future scans to retry
+      processedNodes.delete(node);
+      return;
+    }
+
+    if (result.action === "blur") {
+      applyBlur(node, result, postData.text);
     }
   }
 
@@ -254,6 +296,10 @@
     }
     const selector = activeAdapter.getPostSelector();
     try {
+      // If root itself matches the selector, process it directly
+      if (root !== document && root.matches && root.matches(selector)) {
+        processNode(root);
+      }
       const nodes = root.querySelectorAll(selector);
       nodes.forEach((node) => processNode(node));
     } catch (err) {
@@ -264,20 +310,27 @@
   // ---------------------------------------------------------------------
   // MutationObserver for Infinite-Scroll Feeds
   // ---------------------------------------------------------------------
+  let scanDebounceTimer = null;
   const feedObserver = new MutationObserver((mutations) => {
     if (!activeAdapter) {
       activeAdapter = window.WellbeingAdapterRegistry.getActiveAdapter();
     }
     const selector = activeAdapter.getPostSelector();
 
+    let foundNew = false;
     for (const mutation of mutations) {
       for (const added of mutation.addedNodes) {
         if (added.nodeType !== Node.ELEMENT_NODE) continue;
-        scanForPosts(added.parentNode ? added : document);
+        foundNew = true;
         if (added.matches && added.matches(selector)) {
           processNode(added);
         }
       }
+    }
+
+    if (foundNew) {
+      if (scanDebounceTimer) clearTimeout(scanDebounceTimer);
+      scanDebounceTimer = setTimeout(() => scanForPosts(), 250);
     }
   });
 

@@ -28,6 +28,11 @@ const el = {
   apiBaseInput: document.getElementById("apiBaseInput"),
   apiKeyInput: document.getElementById("apiKeyInput"),
   saveServerBtn: document.getElementById("saveServerBtn"),
+  statLearnedBias: document.getElementById("statLearnedBias"),
+  statActiveTerms: document.getElementById("statActiveTerms"),
+  toleratedTags: document.getElementById("toleratedTags"),
+  refreshPersonalBtn: document.getElementById("refreshPersonalBtn"),
+  resetPersonalBtn: document.getElementById("resetPersonalBtn"),
 };
 
 const DEFAULTS = {
@@ -234,7 +239,72 @@ async function refreshMoodDashboard() {
 el.refreshMoodBtn.addEventListener("click", refreshMoodDashboard);
 
 // ---------------------------------------------------------------------
+// Adaptive Personalization Stats & Control (USP)
+// ---------------------------------------------------------------------
+async function refreshPersonalizationStats() {
+  chrome.storage.local.get(["apiBaseUrl", "apiKey"], async (cfg) => {
+    const apiBase = (cfg.apiBaseUrl || DEFAULT_API_BASE).replace(/\/+$/, "");
+    const headers = {};
+    if (cfg.apiKey) headers["X-API-Key"] = cfg.apiKey;
+
+    try {
+      const res = await fetch(`${apiBase}/personalize-stats/default`, { method: "GET", headers });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      if (el.statLearnedBias) {
+        const bias = data.learned_bias || 0.0;
+        const sign = bias > 0 ? "+" : "";
+        el.statLearnedBias.textContent = `${sign}${bias.toFixed(3)}`;
+      }
+      if (el.statActiveTerms) {
+        el.statActiveTerms.textContent = data.active_feature_shifts || 0;
+      }
+
+      if (el.toleratedTags) {
+        el.toleratedTags.innerHTML = "";
+        const terms = data.top_tolerated || [];
+        if (terms.length === 0) {
+          el.toleratedTags.innerHTML = '<span style="color: var(--text-dim); font-size: 11px;">(None yet — unhide posts to adapt)</span>';
+        } else {
+          terms.forEach((item) => {
+            const span = document.createElement("span");
+            span.className = "tag";
+            span.style.cssText = "background: rgba(55, 242, 161, 0.15); border: 1px solid var(--green); color: var(--green); padding: 2px 8px; font-size: 11px; border-radius: 999px;";
+            span.textContent = `"${item.term}" (${item.shift.toFixed(3)})`;
+            el.toleratedTags.appendChild(span);
+          });
+        }
+      }
+    } catch (err) {
+      if (el.statLearnedBias) el.statLearnedBias.textContent = "—";
+      if (el.statActiveTerms) el.statActiveTerms.textContent = "—";
+    }
+  });
+}
+
+async function resetPersonalizationModel() {
+  chrome.storage.local.get(["apiBaseUrl", "apiKey"], async (cfg) => {
+    const apiBase = (cfg.apiBaseUrl || DEFAULT_API_BASE).replace(/\/+$/, "");
+    const headers = {};
+    if (cfg.apiKey) headers["X-API-Key"] = cfg.apiKey;
+
+    try {
+      await fetch(`${apiBase}/personalize-reset/default`, { method: "POST", headers });
+      chrome.storage.local.set({ learnedSensitivityAdjustment: 0.0, unhideCount: 0 });
+      refreshPersonalizationStats();
+    } catch (err) {
+      console.warn("Reset personalization model failed:", err);
+    }
+  });
+}
+
+if (el.refreshPersonalBtn) el.refreshPersonalBtn.addEventListener("click", refreshPersonalizationStats);
+if (el.resetPersonalBtn) el.resetPersonalBtn.addEventListener("click", resetPersonalizationModel);
+
+// ---------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------
 loadSettings();
 refreshMoodDashboard();
+refreshPersonalizationStats();
