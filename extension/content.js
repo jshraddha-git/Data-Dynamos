@@ -396,6 +396,9 @@
   async function processNode(node, retryCount = 0) {
     if (!settings.extensionEnabled || !node) return;
     if (processedNodes.has(node)) return;
+    if (node.closest && node.closest(".wb-post-wrapper, .wb-target-blurred")) {
+      return;
+    }
 
     if (!activeAdapter) {
       activeAdapter = window.WellbeingAdapterRegistry.getActiveAdapter();
@@ -501,8 +504,45 @@
     box.style.display = "none";
     inputEl._wbWarningBox = box;
 
-    const parent = inputEl.parentElement || document.body;
-    parent.insertBefore(box, inputEl.nextSibling);
+    const isSearchBox =
+      inputEl.type === "search" ||
+      inputEl.name === "q" ||
+      inputEl.name === "search_query" ||
+      inputEl.getAttribute("role") === "searchbox" ||
+      (inputEl.placeholder && inputEl.placeholder.toLowerCase().includes("search")) ||
+      Boolean(
+        inputEl.closest &&
+          inputEl.closest(
+            "faceplate-search-input, reddit-search-large, reddit-header-search-bar, [role='search'], form[action*='search'], ytd-searchbox, .search-box"
+          )
+      );
+
+    if (isSearchBox) {
+      const container =
+        (inputEl.closest &&
+          inputEl.closest(
+            "faceplate-search-input, reddit-search-large, reddit-header-search-bar, [role='search'], form, .search-container, #search-input, ytd-searchbox"
+          )) ||
+        inputEl.parentElement ||
+        document.body;
+
+      try {
+        if (window.getComputedStyle(container).position === "static") {
+          container.style.position = "relative";
+        }
+      } catch (_) {}
+
+      box.style.position = "absolute";
+      box.style.top = "100%";
+      box.style.left = "0";
+      box.style.right = "0";
+      box.style.zIndex = "999999";
+      box.style.marginTop = "6px";
+      container.appendChild(box);
+    } else {
+      const parent = inputEl.parentElement || document.body;
+      parent.insertBefore(box, inputEl.nextSibling);
+    }
     return box;
   }
 
@@ -513,28 +553,80 @@
       return;
     }
     box.style.display = "block";
-    box.innerHTML = `<strong>⚠ This might come across as harsh</strong> (toxicity score: ${(
-      result.toxicity_score * 100
-    ).toFixed(0)}%)<span class="wb-suggestion">Suggested rephrase: "${result.suggestion}"</span>`;
+
+    if (result.trigger_matched) {
+      box.className = "wb-draft-warning wb-search-trigger-warning";
+      box.innerHTML = `<strong>🛡 Sensitive Topic Warning: "${escapeHtml(result.matched_trigger)}"</strong><span class="wb-suggestion">${escapeHtml(result.suggestion)}</span>`;
+    } else {
+      box.className = "wb-draft-warning";
+      box.innerHTML = `<strong>⚠ This might come across as harsh</strong> (toxicity score: ${(
+        result.toxicity_score * 100
+      ).toFixed(0)}%)<span class="wb-suggestion">Suggested rephrase: "${escapeHtml(result.suggestion)}"</span>`;
+    }
   }
 
   const debouncedDraftCheck = debounce(async (inputEl) => {
     if (!settings.draftCheckEnabled) return;
     const text = activeAdapter.getDraftText(inputEl);
-    if (!text || text.trim().length < 4) {
+    if (!text || text.trim().length < 2) {
       renderDraftWarning(inputEl, null);
       return;
     }
+
+    // Check user triggers (e.g., "layoffs", "spoilers") in search or compose box
+    const lowerText = text.toLowerCase();
+    const matchedTrigger = (settings.userTriggers || []).find((trig) => {
+      const clean = trig.trim().toLowerCase();
+      return clean && (lowerText.includes(clean) || (clean.length > 3 && lowerText.split(/\s+/).some((w) => clean.includes(w))));
+    });
+
+    if (matchedTrigger) {
+      renderDraftWarning(inputEl, {
+        is_risky: true,
+        trigger_matched: true,
+        matched_trigger: matchedTrigger,
+        toxicity_score: 0.0,
+        suggestion: `You are searching or typing a configured trigger topic ("${matchedTrigger}"). Results may contain sensitive or distressing content.`,
+      });
+      return;
+    }
+
+    if (text.trim().length < 4) {
+      renderDraftWarning(inputEl, null);
+      return;
+    }
+
     const result = await checkDraft(text);
     renderDraftWarning(inputEl, result);
-  }, 500);
+  }, 400);
 
   function attachComposeListeners(root = document) {
     if (!activeAdapter) {
       activeAdapter = window.WellbeingAdapterRegistry.getActiveAdapter();
     }
     const composeSelector = activeAdapter.getComposeSelector();
-    root.querySelectorAll(composeSelector).forEach((el) => {
+
+    // 1. Light DOM query
+    const targetInputs = new Set();
+    try {
+      root.querySelectorAll(composeSelector).forEach((el) => targetInputs.add(el));
+    } catch (_) {}
+
+    // 2. Query inside open Shadow Roots (common in Reddit / YouTube Web Components)
+    const customComponents = root.querySelectorAll(
+      "faceplate-search-input, reddit-header-search-bar, reddit-search-large, shreddit-composer, ytd-searchbox"
+    );
+    customComponents.forEach((comp) => {
+      if (comp.shadowRoot) {
+        comp.shadowRoot
+          .querySelectorAll("input, textarea, [contenteditable='true']")
+          .forEach((el) => targetInputs.add(el));
+      }
+      comp.querySelectorAll("input, textarea").forEach((el) => targetInputs.add(el));
+    });
+
+    // 3. Attach listeners
+    targetInputs.forEach((el) => {
       if (el._wbListenerAttached) return;
       el._wbListenerAttached = true;
       el.addEventListener("input", () => debouncedDraftCheck(el));
@@ -551,12 +643,56 @@
   }
 
   // ---------------------------------------------------------------------
+  // SPA Navigation & Search View Transitions
+  // ---------------------------------------------------------------------
+  let lastUrl = location.href;
+  function handleUrlChange() {
+    if (location.href === lastUrl) return;
+    lastUrl = location.href;
+
+    // Fast-path scan for new search results or navigated feed
+    setTimeout(() => {
+      scanForPosts();
+      attachComposeListeners();
+    }, 300);
+
+    // Delayed retry for lazily-rendered search result elements
+    setTimeout(() => {
+      scanForPosts();
+    }, 1000);
+  }
+
+  function setupSpaNavigationWatcher() {
+    const originalPushState = history.pushState;
+    if (originalPushState) {
+      history.pushState = function (...args) {
+        const result = originalPushState.apply(this, args);
+        handleUrlChange();
+        return result;
+      };
+    }
+
+    const originalReplaceState = history.replaceState;
+    if (originalReplaceState) {
+      history.replaceState = function (...args) {
+        const result = originalReplaceState.apply(this, args);
+        handleUrlChange();
+        return result;
+      };
+    }
+
+    window.addEventListener("popstate", handleUrlChange);
+  }
+
+  // ---------------------------------------------------------------------
   // Initialization
   // ---------------------------------------------------------------------
   (async function init() {
     await loadSettings();
     activeAdapter = window.WellbeingAdapterRegistry.getActiveAdapter();
     console.log(`[AI Wellbeing Buffer] Initialized on ${window.location.hostname} using ${activeAdapter.name} adapter`);
+
+    setupSpaNavigationWatcher();
 
     if (!document.body) {
       window.addEventListener("DOMContentLoaded", () => {

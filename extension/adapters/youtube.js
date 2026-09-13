@@ -16,7 +16,7 @@ class YouTubeAdapter extends window.BasePlatformAdapter {
   }
 
   getComposeSelector() {
-    return "div#contenteditable-root[contenteditable='true'], ytd-commentbox textarea";
+    return "div#contenteditable-root[contenteditable='true'], ytd-commentbox textarea, input#search, ytd-searchbox input, input[name='search_query']";
   }
 
   extractText(node) {

@@ -12,21 +12,21 @@ class RedditAdapter extends window.BasePlatformAdapter {
   }
 
   getPostSelector() {
-    return "shreddit-post, div[data-testid='post-container'], shreddit-comment, .Comment, .entry";
+    return "shreddit-post, div[data-testid='post-container'], shreddit-comment, .Comment, .entry, div[data-testid*='search-post'], div[data-testid*='search-result'], div[data-testid='search-slink-post'], search-telemetry-tracker, [data-testid='search-unit'], [data-testid='search-post-unit'], .search-result, .search-result-link, community-post";
   }
 
   getComposeSelector() {
-    return "shreddit-composer, div[role='textbox'][contenteditable='true'], textarea[name='text']";
+    return "shreddit-composer, div[role='textbox'][contenteditable='true'], textarea[name='text'], input[type='search'], input[name='q'], [role='searchbox'], faceplate-search-input input, reddit-search-large input, reddit-header-search-bar input, input[placeholder*='Search' i], input[aria-label*='Search' i], input[data-testid*='search']";
   }
 
   extractText(node) {
     let title = (node.getAttribute && node.getAttribute("post-title")) || "";
     if (!title) {
-      const titleEl = node.querySelector("[slot='title'], h1, h2, h3, a[data-testid='post-title'], a[slot='full-post-link'], p[data-testid='post-title']");
+      const titleEl = node.querySelector("[slot='title'], h1, h2, h3, a[data-testid='post-title'], a[slot='full-post-link'], p[data-testid='post-title'], a[data-testid*='search-post-link'], [data-testid='post-title-text']");
       if (titleEl) title = (titleEl.innerText || titleEl.textContent || "").trim();
     }
 
-    const bodyEl = node.querySelector("[slot='text-body'], [slot='comment'], div[data-testid='post-content'], .usertext-body, div[id$='-post-rtjson-content'], [data-click-id='text'], .md, p");
+    const bodyEl = node.querySelector("[slot='text-body'], [slot='comment'], div[data-testid='post-content'], .usertext-body, div[id$='-post-rtjson-content'], [data-click-id='text'], .md, p, [data-testid*='search-post-snippet'], [data-testid*='post-snippet']");
     const body = bodyEl ? (bodyEl.innerText || bodyEl.textContent || "").trim() : "";
 
     let shadowText = "";

@@ -15,7 +15,7 @@ class TwitterAdapter extends window.BasePlatformAdapter {
   }
 
   getComposeSelector() {
-    return "[data-testid='tweetTextarea_0'], [data-testid='tweetTextarea_0_label'], div[role='textbox'][data-testid*='tweet']";
+    return "[data-testid='tweetTextarea_0'], [data-testid='tweetTextarea_0_label'], div[role='textbox'][data-testid*='tweet'], input[data-testid='SearchBox_Search_Input'], input[role='combobox'][placeholder*='Search' i]";
   }
 
   extractText(node) {
