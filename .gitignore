@@ -28,3 +28,4 @@ backend/cache/
 # Downloaded model weight caches (Detoxify / sentence-transformers / NudeNet)
 *.cache/
 ~/.cache/torch/
+cyhi-logs/.local/
